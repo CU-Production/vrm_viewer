@@ -20,12 +20,19 @@
 #include <VRMC/VRM.h>
 
 #define STB_IMAGE_IMPLEMENTATION
+#define STBI_WINDOWS_UTF8
 #include "stb_image.h"
 
 #include <vector>
 #include <string>
 #include <cstdio>
 #include <cmath>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 // ============================================================================
 // Shader code (HLSL for D3D11)
@@ -290,6 +297,68 @@ static void log_message(const char* msg) {
     printf("[VRM Viewer] %s\n", msg);
 }
 
+// ============================================================================
+// UTF-8 file reading support for Windows
+// ============================================================================
+
+#ifdef _WIN32
+static std::wstring utf8_to_wstring(const char* utf8_str) {
+    if (!utf8_str || !*utf8_str) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, nullptr, 0);
+    if (len <= 0) return L"";
+    std::wstring result(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, &result[0], len);
+    return result;
+}
+
+static bool read_file_utf8(const char* filepath, std::vector<uint8_t>& out_data) {
+    std::wstring wpath = utf8_to_wstring(filepath);
+    HANDLE hFile = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, 
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize)) {
+        CloseHandle(hFile);
+        return false;
+    }
+    
+    out_data.resize((size_t)fileSize.QuadPart);
+    DWORD bytesRead;
+    BOOL success = ReadFile(hFile, out_data.data(), (DWORD)fileSize.QuadPart, &bytesRead, nullptr);
+    CloseHandle(hFile);
+    
+    return success && bytesRead == fileSize.QuadPart;
+}
+
+static FILE* fopen_utf8(const char* filepath, const char* mode) {
+    std::wstring wpath = utf8_to_wstring(filepath);
+    std::wstring wmode = utf8_to_wstring(mode);
+    return _wfopen(wpath.c_str(), wmode.c_str());
+}
+#else
+static bool read_file_utf8(const char* filepath, std::vector<uint8_t>& out_data) {
+    FILE* f = fopen(filepath, "rb");
+    if (!f) return false;
+    
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    out_data.resize(size);
+    size_t read = fread(out_data.data(), 1, size, f);
+    fclose(f);
+    
+    return read == (size_t)size;
+}
+
+static FILE* fopen_utf8(const char* filepath, const char* mode) {
+    return fopen(filepath, mode);
+}
+#endif
+
 static sg_view create_texture_view(sg_image img) {
     sg_view_desc view_desc = {};
     view_desc.texture.image = img;
@@ -336,11 +405,18 @@ static sg_image load_texture_from_file(const char* base_path, const char* uri) {
     }
     path += uri;
     
+    // Read file with UTF-8 support
+    std::vector<uint8_t> file_data;
+    if (!read_file_utf8(path.c_str(), file_data)) {
+        log_message(("Failed to read texture file: " + path).c_str());
+        return state.default_texture;
+    }
+    
     int width, height, channels;
     stbi_set_flip_vertically_on_load(0);
-    uint8_t* pixels = stbi_load(path.c_str(), &width, &height, &channels, 4);
+    uint8_t* pixels = stbi_load_from_memory(file_data.data(), (int)file_data.size(), &width, &height, &channels, 4);
     if (!pixels) {
-        log_message(("Failed to load texture: " + path).c_str());
+        log_message(("Failed to decode texture: " + path).c_str());
         return state.default_texture;
     }
     
@@ -359,18 +435,61 @@ static sg_image load_texture_from_file(const char* base_path, const char* uri) {
 // GLTF/GLB/VRM Loading
 // ============================================================================
 
+// Custom cgltf file read callback for UTF-8 path support
+static cgltf_result cgltf_read_file_utf8(const cgltf_memory_options* memory_options, 
+                                          const cgltf_file_options* file_options,
+                                          const char* path, cgltf_size* size, void** data) {
+    (void)file_options;
+    
+    std::vector<uint8_t> file_data;
+    if (!read_file_utf8(path, file_data)) {
+        return cgltf_result_file_not_found;
+    }
+    
+    void* (*memory_alloc)(void*, cgltf_size) = memory_options->alloc ? memory_options->alloc : &cgltf_default_alloc;
+    void* result = memory_alloc(memory_options->user_data, file_data.size());
+    if (!result) {
+        return cgltf_result_out_of_memory;
+    }
+    
+    memcpy(result, file_data.data(), file_data.size());
+    *size = file_data.size();
+    *data = result;
+    
+    return cgltf_result_success;
+}
+
+static void cgltf_release_file_utf8(const cgltf_memory_options* memory_options,
+                                     const cgltf_file_options* file_options, void* data) {
+    (void)file_options;
+    void (*memory_free)(void*, void*) = memory_options->free ? memory_options->free : &cgltf_default_free;
+    memory_free(memory_options->user_data, data);
+}
+
 static bool load_model(const char* filepath) {
     log_message(("Loading model: " + std::string(filepath)).c_str());
     
+    // Read file with UTF-8 support
+    std::vector<uint8_t> file_data;
+    if (!read_file_utf8(filepath, file_data)) {
+        log_message("Failed to read model file");
+        return false;
+    }
+    
     cgltf_options options = {};
+    options.file.read = cgltf_read_file_utf8;
+    options.file.release = cgltf_release_file_utf8;
+    
     cgltf_data* data = nullptr;
     
-    cgltf_result result = cgltf_parse_file(&options, filepath, &data);
+    // Parse from memory
+    cgltf_result result = cgltf_parse(&options, file_data.data(), file_data.size(), &data);
     if (result != cgltf_result_success) {
         log_message("Failed to parse GLTF file");
         return false;
     }
     
+    // Load buffers (uses our custom file read callback for external files)
     result = cgltf_load_buffers(&options, data, filepath);
     if (result != cgltf_result_success) {
         log_message("Failed to load GLTF buffers");
