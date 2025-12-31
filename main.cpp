@@ -13,6 +13,12 @@
 #define CGLTF_IMPLEMENTATION
 #include "cgltf/cgltf.h"
 
+#include "nlohmann/json.hpp"
+
+#define USE_VRMC_VRM_0_0
+#define USE_VRMC_VRM_1_0
+#include <VRMC/VRM.h>
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -687,7 +693,8 @@ static void init() {
     pip_desc.layout.attrs[1].format = SG_VERTEXFORMAT_FLOAT3;  // normal
     pip_desc.layout.attrs[2].format = SG_VERTEXFORMAT_FLOAT2;  // uv
     pip_desc.index_type = SG_INDEXTYPE_UINT32;
-    pip_desc.cull_mode = SG_CULLMODE_BACK;
+    // pip_desc.cull_mode = SG_CULLMODE_BACK;
+    pip_desc.cull_mode = SG_CULLMODE_NONE;
     pip_desc.depth.write_enabled = true;
     pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
     pip_desc.label = "mesh-pipeline";
@@ -831,8 +838,8 @@ static void event(const sapp_event* ev) {
                 float dx = ev->mouse_x - state.last_mouse_x;
                 float dy = ev->mouse_y - state.last_mouse_y;
                 
-                state.cam_azimuth -= dx * 0.002f;
-                state.cam_elevation += dy * 0.002f;
+                state.cam_azimuth -= dx * 0.001f;
+                state.cam_elevation += dy * 0.001f;
                 
                 // Clamp elevation
                 state.cam_elevation = HMM_Clamp(-89.0f, state.cam_elevation, 89.0f);
