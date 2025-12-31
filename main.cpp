@@ -1016,11 +1016,5 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     desc.logger.func = slog_func;
     desc.high_dpi = true;
     
-    // Try to load model from command line
-    if (argc > 1) {
-        // Store for later loading in init()
-        // We can't load here because sokol isn't initialized yet
-    }
-    
     return desc;
 }
