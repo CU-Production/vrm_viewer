@@ -5,3 +5,11 @@ target_include_directories(sokol INTERFACE sokol)
 # VRM.h
 add_library(vrm_h INTERFACE)
 target_include_directories(vrm_h INTERFACE VRM.h/include)
+
+# stb
+add_library(stb INTERFACE)
+target_include_directories(stb INTERFACE stb)
+
+# hmm
+add_library(hmm INTERFACE)
+target_include_directories(hmm INTERFACE HandmadeMath)
