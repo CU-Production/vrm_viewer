@@ -74,32 +74,35 @@ out vec4 frag_color;
 const float PI = 3.14159265359;
 
 // ============================================================================
-// Lighting Configuration
+// Lighting Configuration (MToon-inspired, VRChat compatible)
 // ============================================================================
 
 // Main directional light
-const vec3 LIGHT_DIR = normalize(vec3(0.6, 1.0, 0.4));
-const vec3 LIGHT_COLOR = vec3(1.0, 0.98, 0.95);
-const float LIGHT_INTENSITY = 1.2;
+const vec3 LIGHT_DIR = normalize(vec3(0.5, 1.0, 0.3));
+const vec3 LIGHT_COLOR = vec3(1.0, 1.0, 1.0);
+const float LIGHT_INTENSITY = 1.0;          // Neutral intensity
 
-// Shadow ramp settings (soft transition, not hard cel-shading)
-const float SHADOW_RAMP_SMOOTH = 0.15;      // Transition width
-const float SHADOW_RAMP_OFFSET = 0.0;       // Shift shadow boundary
-const vec3 SHADOW_TINT = vec3(0.85, 0.8, 0.95);  // Subtle purple tint in shadows
-const float SHADOW_STRENGTH = 0.45;         // How dark shadows get (0=black, 1=no shadow)
+// Shade settings (MToon style - softer than cel-shading)
+const float SHADE_SHIFT = 0.0;              // Shift shade boundary (-1 to 1)
+const float SHADE_TOONY = 0.5;              // 0 = smooth gradient, 1 = hard edge
+const float SHADE_STRENGTH = 0.65;          // How much darker shade is (0 = same as lit)
 
-// Specular settings
-const float SPEC_INTENSITY = 0.6;
-const float SPEC_SHARPNESS = 0.85;          // Higher = sharper specular edge
+// Specular settings (subtle for VRM)
+const float SPEC_INTENSITY = 0.3;           // Lower specular
+const float SPEC_SHARPNESS = 0.9;
 
-// Rim light settings  
-const vec3 RIM_TINT = vec3(1.0, 0.95, 0.92);
-const float RIM_WIDTH = 0.35;
-const float RIM_SOFTNESS = 0.3;
+// Rim light settings (subtle)
+const vec3 RIM_TINT = vec3(1.0, 1.0, 1.0);
+const float RIM_WIDTH = 0.4;
+const float RIM_SOFTNESS = 0.25;
+const float RIM_LIFT = 0.0;                 // Lift rim into shadow areas
 
-// Environment/IBL settings
-const float ENV_DIFFUSE_STRENGTH = 0.15;
-const float ENV_SPEC_STRENGTH = 0.25;
+// Environment/IBL settings (minimal for VRM)
+const float ENV_DIFFUSE_STRENGTH = 0.05;    // Very subtle
+const float ENV_SPEC_STRENGTH = 0.1;
+
+// Global intensity control
+const float GLOBAL_ILLUMINATION = 0.85;     // Overall brightness multiplier
 
 // ============================================================================
 // Utility Functions
@@ -155,27 +158,34 @@ float G_Smith(float NdotV, float NdotL, float roughness) {
 }
 
 // ============================================================================
-// Stylized Diffuse Shading
+// MToon-style Diffuse Shading
 // ============================================================================
 
 vec3 calculateDiffuse(vec3 baseColor, float NdotL, float ao) {
-    // Remap NdotL with offset
-    float remappedNdotL = NdotL + SHADOW_RAMP_OFFSET;
+    // MToon-style shading: shift and toony parameters
+    // Shift moves the boundary, toony controls the hardness
+    float shadeShift = SHADE_SHIFT;
+    float shadeToony = SHADE_TOONY;
     
-    // Soft shadow ramp (not hard step)
-    float shadowFactor = softStep(0.0, remappedNdotL, SHADOW_RAMP_SMOOTH);
+    // Calculate shade factor with shift
+    float halfLambert = NdotL * 0.5 + 0.5;  // Remap -1..1 to 0..1
+    float shadeValue = halfLambert + shadeShift;
     
-    // Shadow color: darken and tint
-    vec3 shadowColor = baseColor * SHADOW_TINT * SHADOW_STRENGTH;
+    // Apply toony factor (0 = linear gradient, 1 = step function)
+    float shadeWidth = 1.0 - shadeToony;
+    float shadeFactor = smoothstep(0.5 - shadeWidth * 0.5, 0.5 + shadeWidth * 0.5, shadeValue);
     
-    // Lit color: full base color with slight boost
+    // Shade color is darkened base color (no tint, keeps original hue)
+    vec3 shadeColor = baseColor * (1.0 - SHADE_STRENGTH);
+    
+    // Lit color: base color as-is
     vec3 litColor = baseColor;
     
-    // Blend between shadow and lit
-    vec3 diffuse = mix(shadowColor, litColor, shadowFactor);
+    // Blend between shade and lit
+    vec3 diffuse = mix(shadeColor, litColor, shadeFactor);
     
-    // Apply ambient occlusion
-    diffuse *= mix(0.7, 1.0, ao);
+    // Apply ambient occlusion (subtle)
+    diffuse *= mix(0.85, 1.0, ao);
     
     return diffuse;
 }
@@ -209,7 +219,7 @@ vec3 calculateSpecular(vec3 N, vec3 V, vec3 L, vec3 baseColor, float roughness, 
 }
 
 // ============================================================================
-// Rim Light
+// Rim Light (MToon style)
 // ============================================================================
 
 vec3 calculateRim(vec3 N, vec3 V, vec3 baseColor, float NdotL) {
@@ -219,15 +229,17 @@ vec3 calculateRim(vec3 N, vec3 V, vec3 baseColor, float NdotL) {
     float rim = 1.0 - NdotV;
     rim = pow(max(rim, 0.0), toon_rim_power);
     
-    // Soft threshold
-    rim = softStep(1.0 - RIM_WIDTH, rim, RIM_SOFTNESS);
+    // Soft threshold with width control
+    float rimThreshold = 1.0 - RIM_WIDTH;
+    rim = softStep(rimThreshold, rim, RIM_SOFTNESS);
     
-    // Reduce rim in deep shadow (looks more natural)
-    float shadowMask = softStep(-0.3, NdotL, 0.2);
-    rim *= mix(0.2, 1.0, shadowMask);
+    // MToon style: rim can be lifted into shadow or only in lit areas
+    float halfLambert = NdotL * 0.5 + 0.5;
+    float rimMask = smoothstep(0.0, 0.5, halfLambert + RIM_LIFT);
+    rim *= rimMask;
     
-    // Rim color: blend between tint and base color
-    vec3 rimColor = mix(RIM_TINT, baseColor * 1.2, 0.25);
+    // Rim color: white-ish, subtle influence from base
+    vec3 rimColor = RIM_TINT;
     
     return rimColor * rim * toon_rim_strength;
 }
@@ -263,20 +275,16 @@ vec3 calculateEnvironment(vec3 N, vec3 V, vec3 R, vec3 baseColor, float roughnes
 // Tonemapping and Color Grading
 // ============================================================================
 
-// ACES approximation (keeps colors vibrant)
-vec3 ACESFilm(vec3 x) {
-    float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+// Simple Reinhard tonemapping (gentler than ACES, good for VRM)
+vec3 tonemapReinhard(vec3 x) {
+    return x / (x + vec3(1.0));
 }
 
-// Subtle color grading for anime aesthetic
+// Minimal color grading (preserve VRM texture colors)
 vec3 colorGrade(vec3 color) {
-    // Slight saturation boost
+    // Very subtle saturation adjustment
     float luma = dot(color, vec3(0.299, 0.587, 0.114));
-    color = mix(vec3(luma), color, 1.1);
-    
-    // Subtle contrast curve
-    color = color * color * (3.0 - 2.0 * color);  // S-curve
+    color = mix(vec3(luma), color, 1.05);  // +5% saturation
     
     return color;
 }
@@ -341,20 +349,29 @@ void main() {
     // ------------------------------------------------------------------------
     vec3 color = vec3(0.0);
     
-    // Main lighting
-    color += diffuse * LIGHT_COLOR * LIGHT_INTENSITY;
+    // Main diffuse (already includes shading)
+    color = diffuse * LIGHT_COLOR * LIGHT_INTENSITY;
+    
+    // Add specular (subtle)
     color += specular;
+    
+    // Add rim light
     color += rim;
+    
+    // Add environment (very subtle for VRM)
     color += env;
+    
+    // Apply global illumination control
+    color *= GLOBAL_ILLUMINATION;
     
     // ------------------------------------------------------------------------
     // Post Processing
     // ------------------------------------------------------------------------
     
-    // Tonemapping
-    color = ACESFilm(color);
+    // Gentle tonemapping (Reinhard preserves colors better)
+    color = tonemapReinhard(color);
     
-    // Color grading
+    // Minimal color grading
     color = colorGrade(color);
     
     // Linear to sRGB
