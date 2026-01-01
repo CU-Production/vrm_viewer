@@ -60,9 +60,9 @@ endfunction()
 # Main executable
 # ============================================================================
 
-add_executable(vrm_viewer WIN32 main.cpp)
+add_executable(vrm_viewer WIN32 main.cpp impl.c gui.c)
 target_include_directories(vrm_viewer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(vrm_viewer PRIVATE vrm_h sokol hmm stb parallel-util)
+target_link_libraries(vrm_viewer PRIVATE vrm_h sokol hmm stb parallel-util fontstash clay)
 
 # Compile shaders
 add_sokol_shader(vrm_viewer shader/mesh.glsl)

@@ -4,11 +4,13 @@
 #define HANDMADE_MATH_USE_DEGREES
 #include "HandmadeMath.h"
 
-#define SOKOL_IMPL
 #include "sokol_app.h"
 #include "sokol_gfx.h"
 #include "sokol_log.h"
 #include "sokol_glue.h"
+
+// GUI (Clay-based, compiled as C)
+#include "gui.h"
 
 #define CGLTF_IMPLEMENTATION
 #include "cgltf/cgltf.h"
@@ -19,7 +21,6 @@
 #define USE_VRMC_VRM_1_0
 #include <VRMC/VRM.h>
 
-#define STB_IMAGE_IMPLEMENTATION
 #define STBI_WINDOWS_UTF8
 #include "stb_image.h"
 
@@ -152,6 +153,18 @@ static struct {
     float skybox_lod;
     float skybox_exposure;
     bool show_skybox;
+    
+    // GUI
+    bool show_gui;
+    bool gui_hovered;  // True when mouse is over GUI
+    
+    // Toon shader parameters (adjustable via GUI)
+    float toon_light_intensity;
+    float toon_shade_toony;
+    float toon_shade_strength;
+    float toon_rim_threshold;
+    float toon_rim_softness;
+    float toon_spec_intensity;
 } state;
 
 // ============================================================================
@@ -1225,6 +1238,9 @@ static void init() {
     desc.logger.func = slog_func;
     sg_setup(&desc);
     
+    // Initialize GUI (Clay-based)
+    gui_init();
+    
     // Create default textures
     state.default_texture = create_default_white_texture();
     state.default_texture_view = create_texture_view(state.default_texture);
@@ -1363,12 +1379,30 @@ static void init() {
     state.skybox_exposure = 1.0f;
     state.show_skybox = true;
     
+    // GUI settings
+    state.show_gui = true;
+    state.gui_hovered = false;
+    
+    // Toon shader defaults (matching toon.glsl)
+    state.toon_light_intensity = 1.0f;
+    state.toon_shade_toony = 0.5f;
+    state.toon_shade_strength = 0.65f;
+    state.toon_rim_threshold = 0.7f;
+    state.toon_rim_softness = 0.3f;
+    state.toon_spec_intensity = 0.3f;
+    
     log_message("Ready. Drag and drop a VRM/GLTF/GLB file to load.");
-    log_message("Press 'S' to toggle skybox, '+'/'-' to adjust exposure, '['/']' to adjust LOD");
+    log_message("Press 'G' to toggle GUI, 'S' to toggle skybox");
 }
 
 static void frame() {
     state.time += (float)sapp_frame_duration();
+    
+    // Start new GUI frame
+    gui_new_frame();
+    
+    // Check if mouse is over GUI (for blocking 3D interactions)
+    state.gui_hovered = state.show_gui && gui_is_hovered();
     
     // Calculate camera position
     float azimuth_rad = HMM_AngleRad(state.cam_azimuth);
@@ -1543,6 +1577,24 @@ static void frame() {
         }
     }
     
+    // Render GUI
+    GuiState gui_state = {};
+    gui_state.model_loaded = state.model_loaded;
+    gui_state.is_vrm_model = state.is_vrm_model;
+    gui_state.mesh_count = (int)state.model.meshes.size();
+    gui_state.show_skybox = state.show_skybox;
+    gui_state.skybox_exposure = state.skybox_exposure;
+    gui_state.skybox_lod = state.skybox_lod;
+    gui_state.toon_light_intensity = state.toon_light_intensity;
+    gui_state.toon_shade_toony = state.toon_shade_toony;
+    gui_state.toon_shade_strength = state.toon_shade_strength;
+    gui_state.toon_rim_threshold = state.toon_rim_threshold;
+    gui_state.toon_rim_softness = state.toon_rim_softness;
+    gui_state.toon_spec_intensity = state.toon_spec_intensity;
+    gui_state.show_gui = state.show_gui;
+    gui_state.gui_hovered = state.gui_hovered;
+    gui_render(&gui_state);
+    
     sg_end_pass();
     sg_commit();
 }
@@ -1608,13 +1660,20 @@ static void cleanup() {
     sg_destroy_pipeline(state.pbr_pip);
     sg_destroy_pipeline(state.pip);
     
+    // Cleanup GUI
+    gui_shutdown();
+    
     sg_shutdown();
 }
 
 static void event(const sapp_event* ev) {
+    // Pass events to GUI
+    gui_handle_event(ev);
+    
     switch (ev->type) {
         case SAPP_EVENTTYPE_MOUSE_DOWN:
-            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
+            // Don't start camera drag if over GUI
+            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT && !state.gui_hovered) {
                 state.mouse_down = true;
                 state.last_mouse_x = ev->mouse_x;
                 state.last_mouse_y = ev->mouse_y;
@@ -1628,7 +1687,7 @@ static void event(const sapp_event* ev) {
             break;
             
         case SAPP_EVENTTYPE_MOUSE_MOVE:
-            if (state.mouse_down) {
+            if (state.mouse_down && !state.gui_hovered) {
                 float dx = ev->mouse_x - state.last_mouse_x;
                 float dy = ev->mouse_y - state.last_mouse_y;
                 
@@ -1644,8 +1703,11 @@ static void event(const sapp_event* ev) {
             break;
             
         case SAPP_EVENTTYPE_MOUSE_SCROLL:
-            state.cam_distance -= ev->scroll_y * state.cam_distance * 0.1f;
-            state.cam_distance = HMM_MAX(0.1f, state.cam_distance);
+            // Don't zoom if over GUI
+            if (!state.gui_hovered) {
+                state.cam_distance -= ev->scroll_y * state.cam_distance * 0.1f;
+                state.cam_distance = HMM_MAX(0.1f, state.cam_distance);
+            }
             break;
             
         case SAPP_EVENTTYPE_FILES_DROPPED: {
@@ -1668,6 +1730,9 @@ static void event(const sapp_event* ev) {
                     state.cam_elevation = 15.0f;
                     state.cam_azimuth = 45.0f;
                 }
+            } else if (ev->key_code == SAPP_KEYCODE_G) {
+                // Toggle GUI
+                state.show_gui = !state.show_gui;
             } else if (ev->key_code == SAPP_KEYCODE_S) {
                 // Toggle skybox
                 state.show_skybox = !state.show_skybox;
