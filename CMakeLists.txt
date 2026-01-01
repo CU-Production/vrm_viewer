@@ -73,8 +73,8 @@ add_sokol_shader(vrm_viewer shader/toon.glsl)
 # Platform-specific settings
 if(WIN32)
     # For D3D11 backend on Windows
-#    target_compile_definitions(vrm_viewer PRIVATE SOKOL_D3D11)
-    target_compile_definitions(vrm_viewer PRIVATE SOKOL_GLCORE)
+    target_compile_definitions(vrm_viewer PRIVATE SOKOL_D3D11)
+#    target_compile_definitions(vrm_viewer PRIVATE SOKOL_GLCORE)
     target_link_libraries(vrm_viewer PRIVATE
         d3d11
         dxgi

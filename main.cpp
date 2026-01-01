@@ -1004,6 +1004,7 @@ static void init() {
     toon_pip_desc.layout.attrs[0].format = SG_VERTEXFORMAT_FLOAT3;  // position
     toon_pip_desc.layout.attrs[1].format = SG_VERTEXFORMAT_FLOAT3;  // normal
     toon_pip_desc.layout.attrs[2].format = SG_VERTEXFORMAT_FLOAT2;  // uv
+    toon_pip_desc.layout.attrs[3].format = SG_VERTEXFORMAT_FLOAT4;  // tangent
     toon_pip_desc.index_type = SG_INDEXTYPE_UINT32;
     toon_pip_desc.cull_mode = SG_CULLMODE_NONE;
     toon_pip_desc.depth.write_enabled = true;
