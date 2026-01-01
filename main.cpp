@@ -305,6 +305,375 @@ static sg_image load_texture_from_file(const char* base_path, const char* uri) {
 // HDR Loading and IBL
 // ============================================================================
 
+// Sample equirectangular HDR texture
+static void sample_equirectangular(const float* hdr_data, int width, int height, 
+                                    float theta, float phi, float* out_rgb) {
+    // Convert spherical coordinates to UV
+    float u = phi / (2.0f * 3.14159265359f);
+    float v = theta / 3.14159265359f;
+    
+    // Clamp to valid range
+    u = fmodf(u + 1.0f, 1.0f);
+    v = fmaxf(0.0f, fminf(1.0f, v));
+    
+    // Sample with bilinear filtering
+    float x = u * width;
+    float y = v * height;
+    int x0 = (int)floorf(x);
+    int y0 = (int)floorf(y);
+    int x1 = (x0 + 1) % width;
+    int y1 = fminf(y0 + 1, height - 1);
+    
+    float fx = x - x0;
+    float fy = y - y0;
+    
+    // Sample 4 pixels
+    int idx00 = (y0 * width + x0) * 3;
+    int idx10 = (y0 * width + x1) * 3;
+    int idx01 = (y1 * width + x0) * 3;
+    int idx11 = (y1 * width + x1) * 3;
+    
+    // Bilinear interpolation
+    for (int c = 0; c < 3; c++) {
+        float v00 = hdr_data[idx00 + c];
+        float v10 = hdr_data[idx10 + c];
+        float v01 = hdr_data[idx01 + c];
+        float v11 = hdr_data[idx11 + c];
+        
+        float v0 = v00 * (1.0f - fx) + v10 * fx;
+        float v1 = v01 * (1.0f - fx) + v11 * fx;
+        out_rgb[c] = v0 * (1.0f - fy) + v1 * fy;
+    }
+}
+
+// Convert equirectangular HDR to cubemap
+static sg_image equirectangular_to_cubemap(const float* hdr_data, int hdr_width, int hdr_height, int cubemap_size) {
+    const int face_size = cubemap_size * cubemap_size * 4;  // RGBA8 per face
+    std::vector<uint8_t> cubemap_data(face_size * 6);  // 6 faces
+    
+    // Cubemap face directions: +X, -X, +Y, -Y, +Z, -Z
+    float face_dirs[6][3] = {
+        { 1.0f,  0.0f,  0.0f},  // +X
+        {-1.0f,  0.0f,  0.0f},  // -X
+        { 0.0f,  1.0f,  0.0f},  // +Y
+        { 0.0f, -1.0f,  0.0f},  // -Y
+        { 0.0f,  0.0f,  1.0f},  // +Z
+        { 0.0f,  0.0f, -1.0f}   // -Z
+    };
+    
+    float face_up[6][3] = {
+        { 0.0f, -1.0f,  0.0f},  // +X
+        { 0.0f, -1.0f,  0.0f},  // -X
+        { 0.0f,  0.0f,  1.0f},  // +Y
+        { 0.0f,  0.0f, -1.0f},  // -Y
+        { 0.0f, -1.0f,  0.0f},  // +Z
+        { 0.0f, -1.0f,  0.0f}   // -Z
+    };
+    
+    // Process each pixel in parallel (6 faces * size * size pixels)
+    parallelutil::parallel_for_2d(6 * cubemap_size, cubemap_size, [&](int face_y, int x) {
+        int face = face_y / cubemap_size;
+        int y = face_y % cubemap_size;
+        uint8_t* face_data = cubemap_data.data() + face * face_size;
+        
+        // Convert cubemap UV to world direction
+            float u = (x + 0.5f) / cubemap_size * 2.0f - 1.0f;
+            float v = (y + 0.5f) / cubemap_size * 2.0f - 1.0f;
+            
+            // Get face direction vectors
+            float right[3], up[3], forward[3];
+            memcpy(forward, face_dirs[face], sizeof(float) * 3);
+            memcpy(up, face_up[face], sizeof(float) * 3);
+            
+            // Calculate right vector
+            right[0] = up[1] * forward[2] - up[2] * forward[1];
+            right[1] = up[2] * forward[0] - up[0] * forward[2];
+            right[2] = up[0] * forward[1] - up[1] * forward[0];
+            
+            // Calculate world direction
+            float dir[3];
+            dir[0] = forward[0] + right[0] * u + up[0] * v;
+            dir[1] = forward[1] + right[1] * u + up[1] * v;
+            dir[2] = forward[2] + right[2] * u + up[2] * v;
+            
+            // Normalize
+            float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+            dir[0] /= len;
+            dir[1] /= len;
+            dir[2] /= len;
+            
+            // Convert to spherical coordinates
+            float theta = acosf(fmaxf(-1.0f, fminf(1.0f, dir[1])));  // [0, PI]
+            float phi = atan2f(dir[0], dir[2]) + 3.14159265359f;     // [0, 2*PI]
+            
+            // Sample equirectangular texture
+            float rgb[3];
+            sample_equirectangular(hdr_data, hdr_width, hdr_height, theta, phi, rgb);
+            
+            // Convert to RGBA8 (with tone mapping for display)
+            int idx = (y * cubemap_size + x) * 4;
+            face_data[idx + 0] = (uint8_t)(fminf(rgb[0] * 255.0f / (rgb[0] + 1.0f), 255.0f));
+            face_data[idx + 1] = (uint8_t)(fminf(rgb[1] * 255.0f / (rgb[1] + 1.0f), 255.0f));
+            face_data[idx + 2] = (uint8_t)(fminf(rgb[2] * 255.0f / (rgb[2] + 1.0f), 255.0f));
+            face_data[idx + 3] = 255;
+    });
+    
+    sg_image_desc desc = {};
+    desc.type = SG_IMAGETYPE_CUBE;
+    desc.width = cubemap_size;
+    desc.height = cubemap_size;
+    desc.num_slices = 6;
+    desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    desc.data.mip_levels[0] = { cubemap_data.data(), cubemap_data.size() };
+    desc.label = "environment-cubemap";
+    return sg_make_image(&desc);
+}
+
+// Generate irradiance map by convolving the environment cubemap
+static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, int hdr_height, int size) {
+    const int face_size = size * size * 4;
+    std::vector<uint8_t> irradiance_data(face_size * 6);
+    
+    float face_dirs[6][3] = {
+        { 1.0f,  0.0f,  0.0f}, {-1.0f,  0.0f,  0.0f},
+        { 0.0f,  1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f},
+        { 0.0f,  0.0f,  1.0f}, { 0.0f,  0.0f, -1.0f}
+    };
+    
+    float face_up[6][3] = {
+        { 0.0f, -1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f},
+        { 0.0f,  0.0f,  1.0f}, { 0.0f,  0.0f, -1.0f},
+        { 0.0f, -1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f}
+    };
+    
+    parallelutil::parallel_for_2d(6 * size, size, [&](int face_y, int x) {
+        int face = face_y / size;
+        int y = face_y % size;
+        uint8_t* face_data = irradiance_data.data() + face * face_size;
+        
+        float u = (x + 0.5f) / size * 2.0f - 1.0f;
+            float v = (y + 0.5f) / size * 2.0f - 1.0f;
+            
+            float right[3], up[3], forward[3];
+            memcpy(forward, face_dirs[face], sizeof(float) * 3);
+            memcpy(up, face_up[face], sizeof(float) * 3);
+            
+            right[0] = up[1] * forward[2] - up[2] * forward[1];
+            right[1] = up[2] * forward[0] - up[0] * forward[2];
+            right[2] = up[0] * forward[1] - up[1] * forward[0];
+            
+            float N[3];
+            N[0] = forward[0] + right[0] * u + up[0] * v;
+            N[1] = forward[1] + right[1] * u + up[1] * v;
+            N[2] = forward[2] + right[2] * u + up[2] * v;
+            
+            float len = sqrtf(N[0] * N[0] + N[1] * N[1] + N[2] * N[2]);
+            N[0] /= len; N[1] /= len; N[2] /= len;
+            
+            // Sample hemisphere around normal
+            float irradiance[3] = {0.0f, 0.0f, 0.0f};
+            const int num_samples = 64;
+            std::mt19937 rng(static_cast<unsigned int>(face * size * size + y * size + x));
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            
+            for (int i = 0; i < num_samples; i++) {
+                float Xi1 = dist(rng);
+                float Xi2 = dist(rng);
+                
+                // Cosine-weighted hemisphere sampling
+                float phi = 2.0f * 3.14159265359f * Xi1;
+                float cosTheta = sqrtf(Xi2);
+                float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
+                
+                float tangent[3];
+                if (fabsf(N[0]) < 0.9f) {
+                    tangent[0] = 1.0f; tangent[1] = 0.0f; tangent[2] = 0.0f;
+                } else {
+                    tangent[0] = 0.0f; tangent[1] = 1.0f; tangent[2] = 0.0f;
+                }
+                
+                float bitangent[3];
+                bitangent[0] = N[1] * tangent[2] - N[2] * tangent[1];
+                bitangent[1] = N[2] * tangent[0] - N[0] * tangent[2];
+                bitangent[2] = N[0] * tangent[1] - N[1] * tangent[0];
+                len = sqrtf(bitangent[0] * bitangent[0] + bitangent[1] * bitangent[1] + bitangent[2] * bitangent[2]);
+                bitangent[0] /= len; bitangent[1] /= len; bitangent[2] /= len;
+                
+                float tangent2[3];
+                tangent2[0] = N[1] * bitangent[2] - N[2] * bitangent[1];
+                tangent2[1] = N[2] * bitangent[0] - N[0] * bitangent[2];
+                tangent2[2] = N[0] * bitangent[1] - N[1] * bitangent[0];
+                
+                float L[3];
+                L[0] = tangent2[0] * sinTheta * cosf(phi) + bitangent[0] * sinTheta * sinf(phi) + N[0] * cosTheta;
+                L[1] = tangent2[1] * sinTheta * cosf(phi) + bitangent[1] * sinTheta * sinf(phi) + N[1] * cosTheta;
+                L[2] = tangent2[2] * sinTheta * cosf(phi) + bitangent[2] * sinTheta * sinf(phi) + N[2] * cosTheta;
+                
+                float theta = acosf(fmaxf(-1.0f, fminf(1.0f, L[1])));
+                float phi_dir = atan2f(L[0], L[2]) + 3.14159265359f;
+                
+                float sample_rgb[3];
+                sample_equirectangular(hdr_data, hdr_width, hdr_height, theta, phi_dir, sample_rgb);
+                
+                irradiance[0] += sample_rgb[0] * cosTheta;
+                irradiance[1] += sample_rgb[1] * cosTheta;
+                irradiance[2] += sample_rgb[2] * cosTheta;
+            }
+            
+            irradiance[0] /= num_samples;
+            irradiance[1] /= num_samples;
+            irradiance[2] /= num_samples;
+            irradiance[0] *= 3.14159265359f;  // Multiply by PI for Lambertian
+            irradiance[1] *= 3.14159265359f;
+            irradiance[2] *= 3.14159265359f;
+            
+            int idx = (y * size + x) * 4;
+            face_data[idx + 0] = (uint8_t)(fminf(irradiance[0] * 255.0f / (irradiance[0] + 1.0f), 255.0f));
+            face_data[idx + 1] = (uint8_t)(fminf(irradiance[1] * 255.0f / (irradiance[1] + 1.0f), 255.0f));
+            face_data[idx + 2] = (uint8_t)(fminf(irradiance[2] * 255.0f / (irradiance[2] + 1.0f), 255.0f));
+            face_data[idx + 3] = 255;
+    });
+    
+    sg_image_desc desc = {};
+    desc.type = SG_IMAGETYPE_CUBE;
+    desc.width = size;
+    desc.height = size;
+    desc.num_slices = 6;
+    desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    desc.data.mip_levels[0] = { irradiance_data.data(), irradiance_data.size() };
+    desc.label = "irradiance-map";
+    return sg_make_image(&desc);
+}
+
+// Generate prefilter map with mipmaps
+static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int hdr_height, int size) {
+    const int face_size = size * size * 4;
+    std::vector<uint8_t> prefilter_data(face_size * 6);
+    
+    float face_dirs[6][3] = {
+        { 1.0f,  0.0f,  0.0f}, {-1.0f,  0.0f,  0.0f},
+        { 0.0f,  1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f},
+        { 0.0f,  0.0f,  1.0f}, { 0.0f,  0.0f, -1.0f}
+    };
+    
+    float face_up[6][3] = {
+        { 0.0f, -1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f},
+        { 0.0f,  0.0f,  1.0f}, { 0.0f,  0.0f, -1.0f},
+        { 0.0f, -1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f}
+    };
+    
+    parallelutil::parallel_for_2d(6 * size, size, [&](int face_y, int x) {
+        int face = face_y / size;
+        int y = face_y % size;
+        uint8_t* face_data = prefilter_data.data() + face * face_size;
+        
+        float u = (x + 0.5f) / size * 2.0f - 1.0f;
+            float v = (y + 0.5f) / size * 2.0f - 1.0f;
+            
+            float right[3], up[3], forward[3];
+            memcpy(forward, face_dirs[face], sizeof(float) * 3);
+            memcpy(up, face_up[face], sizeof(float) * 3);
+            
+            right[0] = up[1] * forward[2] - up[2] * forward[1];
+            right[1] = up[2] * forward[0] - up[0] * forward[2];
+            right[2] = up[0] * forward[1] - up[1] * forward[0];
+            
+            float R[3];
+            R[0] = forward[0] + right[0] * u + up[0] * v;
+            R[1] = forward[1] + right[1] * u + up[1] * v;
+            R[2] = forward[2] + right[2] * u + up[2] * v;
+            
+            float len = sqrtf(R[0] * R[0] + R[1] * R[1] + R[2] * R[2]);
+            R[0] /= len; R[1] /= len; R[2] /= len;
+            
+            // Calculate roughness from mip level (simplified - using single mip for now)
+            float roughness = 0.0f;  // Base mip level
+            
+            // Importance sampling for specular IBL
+            float prefiltered[3] = {0.0f, 0.0f, 0.0f};
+            const int num_samples = 32;
+            float total_weight = 0.0f;
+            std::mt19937 rng(static_cast<unsigned int>(face * size * size + y * size + x));
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            
+            for (int i = 0; i < num_samples; i++) {
+                float Xi1 = dist(rng);
+                float Xi2 = dist(rng);
+                
+                // Importance sampling with GGX distribution
+                float phi = 2.0f * 3.14159265359f * Xi1;
+                float cosTheta = sqrtf((1.0f - Xi2) / (1.0f + (roughness * roughness - 1.0f) * Xi2));
+                float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
+                
+                float H[3];
+                H[0] = cosf(phi) * sinTheta;
+                H[1] = sinf(phi) * sinTheta;
+                H[2] = cosTheta;
+                
+                // Transform to world space
+                float tangent[3];
+                if (fabsf(R[0]) < 0.9f) {
+                    tangent[0] = 1.0f; tangent[1] = 0.0f; tangent[2] = 0.0f;
+                } else {
+                    tangent[0] = 0.0f; tangent[1] = 1.0f; tangent[2] = 0.0f;
+                }
+                
+                float bitangent[3];
+                bitangent[0] = R[1] * tangent[2] - R[2] * tangent[1];
+                bitangent[1] = R[2] * tangent[0] - R[0] * tangent[2];
+                bitangent[2] = R[0] * tangent[1] - R[1] * tangent[0];
+                len = sqrtf(bitangent[0] * bitangent[0] + bitangent[1] * bitangent[1] + bitangent[2] * bitangent[2]);
+                bitangent[0] /= len; bitangent[1] /= len; bitangent[2] /= len;
+                
+                float tangent2[3];
+                tangent2[0] = R[1] * bitangent[2] - R[2] * bitangent[1];
+                tangent2[1] = R[2] * bitangent[0] - R[0] * bitangent[2];
+                tangent2[2] = R[0] * bitangent[1] - R[1] * bitangent[0];
+                
+                float L[3];
+                L[0] = tangent2[0] * H[0] + bitangent[0] * H[1] + R[0] * H[2];
+                L[1] = tangent2[1] * H[0] + bitangent[1] * H[1] + R[1] * H[2];
+                L[2] = tangent2[2] * H[0] + bitangent[2] * H[1] + R[2] * H[2];
+                
+                float NdotL = fmaxf(0.0f, L[0] * R[0] + L[1] * R[1] + L[2] * R[2]);
+                if (NdotL > 0.0f) {
+                    float theta = acosf(fmaxf(-1.0f, fminf(1.0f, L[1])));
+                    float phi_dir = atan2f(L[0], L[2]) + 3.14159265359f;
+                    
+                    float sample_rgb[3];
+                    sample_equirectangular(hdr_data, hdr_width, hdr_height, theta, phi_dir, sample_rgb);
+                    
+                    prefiltered[0] += sample_rgb[0] * NdotL;
+                    prefiltered[1] += sample_rgb[1] * NdotL;
+                    prefiltered[2] += sample_rgb[2] * NdotL;
+                    total_weight += NdotL;
+                }
+            }
+            
+            if (total_weight > 0.0f) {
+                prefiltered[0] /= total_weight;
+                prefiltered[1] /= total_weight;
+                prefiltered[2] /= total_weight;
+            }
+            
+            int idx = (y * size + x) * 4;
+            face_data[idx + 0] = (uint8_t)(fminf(prefiltered[0] * 255.0f / (prefiltered[0] + 1.0f), 255.0f));
+            face_data[idx + 1] = (uint8_t)(fminf(prefiltered[1] * 255.0f / (prefiltered[1] + 1.0f), 255.0f));
+            face_data[idx + 2] = (uint8_t)(fminf(prefiltered[2] * 255.0f / (prefiltered[2] + 1.0f), 255.0f));
+            face_data[idx + 3] = 255;
+    });
+    
+    sg_image_desc desc = {};
+    desc.type = SG_IMAGETYPE_CUBE;
+    desc.width = size;
+    desc.height = size;
+    desc.num_slices = 6;
+    desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    desc.data.mip_levels[0] = { prefilter_data.data(), prefilter_data.size() };
+    desc.label = "prefilter-map";
+    return sg_make_image(&desc);
+}
+
 static sg_image load_hdr_texture(const char* filepath) {
     int width, height, channels;
     stbi_set_flip_vertically_on_load(1);
@@ -314,19 +683,20 @@ static sg_image load_hdr_texture(const char* filepath) {
         return state.default_texture;
     }
     
-    // Convert to RGBA8 for now (simplified - in production use HDR format)
-    std::vector<uint8_t> rgba_data(width * height * 4);
+    // Convert RGB to RGBA format (add alpha channel)
+    std::vector<float> rgba_data(width * height * 4);
     for (int i = 0; i < width * height; i++) {
-        rgba_data[i * 4 + 0] = (uint8_t)(fminf(hdr_data[i * 3 + 0] * 255.0f, 255.0f));
-        rgba_data[i * 4 + 1] = (uint8_t)(fminf(hdr_data[i * 3 + 1] * 255.0f, 255.0f));
-        rgba_data[i * 4 + 2] = (uint8_t)(fminf(hdr_data[i * 3 + 2] * 255.0f, 255.0f));
-        rgba_data[i * 4 + 3] = 255;
+        rgba_data[i * 4 + 0] = hdr_data[i * 3 + 0];
+        rgba_data[i * 4 + 1] = hdr_data[i * 3 + 1];
+        rgba_data[i * 4 + 2] = hdr_data[i * 3 + 2];
+        rgba_data[i * 4 + 3] = 1.0f;
     }
     
     sg_image_desc desc = {};
     desc.width = width;
     desc.height = height;
-    desc.data.mip_levels[0] = { rgba_data.data(), rgba_data.size() };
+    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;  // Use 32-bit single-precision float to preserve HDR range
+    desc.data.mip_levels[0] = { rgba_data.data(), rgba_data.size() * sizeof(float) };
     desc.label = "hdr-environment";
     sg_image img = sg_make_image(&desc);
     
@@ -431,24 +801,42 @@ static sg_image create_simple_cubemap(uint8_t r, uint8_t g, uint8_t b) {
     return sg_make_image(&desc);
 }
 
-// Create simplified IBL maps (in production, use proper GPU-based prefiltering)
-static void create_ibl_maps(sg_image hdr_env) {
-    // Create placeholder cubemaps for now
-    // In production, implement proper equirectangular to cubemap conversion
-    // and prefiltering with mipmaps
+// Create IBL maps from HDR environment
+static void create_ibl_maps(const char* hdr_filepath) {
+    // Load HDR data
+    int hdr_width, hdr_height, hdr_channels;
+    stbi_set_flip_vertically_on_load(1);
+    float* hdr_data = stbi_loadf(hdr_filepath, &hdr_width, &hdr_height, &hdr_channels, 3);
+    if (!hdr_data) {
+        log_message(("Failed to load HDR for IBL: " + std::string(hdr_filepath)).c_str());
+        // Fallback to simple cubemaps
+        state.irradiance_map = create_simple_cubemap(50, 60, 70);
+        state.irradiance_map_view = create_texture_view(state.irradiance_map);
+        state.prefilter_map = create_simple_cubemap(80, 90, 100);
+        state.prefilter_map_view = create_texture_view(state.prefilter_map);
+        state.brdf_lut = generate_brdf_lut();
+        state.brdf_lut_view = create_texture_view(state.brdf_lut);
+        return;
+    }
     
-    // Create simple irradiance cubemap (darker blue-gray)
-    state.irradiance_map = create_simple_cubemap(50, 60, 70);
+    log_message("Generating IBL maps from HDR...");
+    
+    // Generate irradiance map
+    int irradiance_size = 32;
+    state.irradiance_map = generate_irradiance_map(hdr_data, hdr_width, hdr_height, irradiance_size);
     state.irradiance_map_view = create_texture_view(state.irradiance_map);
     
-    // Create simple prefilter cubemap (slightly brighter)
-    state.prefilter_map = create_simple_cubemap(80, 90, 100);
+    // Generate prefilter map
+    int prefilter_size = 256;
+    state.prefilter_map = generate_prefilter_map(hdr_data, hdr_width, hdr_height, prefilter_size);
     state.prefilter_map_view = create_texture_view(state.prefilter_map);
     
+    // Generate BRDF LUT
     state.brdf_lut = generate_brdf_lut();
     state.brdf_lut_view = create_texture_view(state.brdf_lut);
     
-    log_message("IBL maps created (placeholder cubemaps - need proper conversion)");
+    stbi_image_free(hdr_data);
+    log_message("IBL maps generated successfully");
 }
 
 // ============================================================================
@@ -957,9 +1345,10 @@ static void init() {
     sg_sampler cubemap_smp = sg_make_sampler(&cubemap_smp_desc);
     
     // Load HDR environment and create IBL maps
-    state.hdr_environment = load_hdr_texture("assets/hdr/modern_evening_street_2k.hdr");
+    const char* hdr_path = "assets/hdr/modern_evening_street_2k.hdr";
+    state.hdr_environment = load_hdr_texture(hdr_path);  // For display only
     state.hdr_environment_view = create_texture_view(state.hdr_environment);
-    create_ibl_maps(state.hdr_environment);
+    create_ibl_maps(hdr_path);  // Generate IBL maps from HDR file
     
     // Create skybox geometry
     float skybox_vertices[] = {
