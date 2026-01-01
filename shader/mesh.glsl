@@ -1,6 +1,8 @@
 // Mesh shader for VRM/GLTF/GLB viewer
 // Compile with: sokol-shdc --input mesh.glsl --output mesh.glsl.h --slang hlsl5:glsl430:metal_macos
 
+@module mesh
+
 @ctype mat4 HMM_Mat4
 @ctype vec4 HMM_Vec4
 @ctype vec3 HMM_Vec3

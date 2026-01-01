@@ -27,7 +27,7 @@ else()
 endif()
 
 # Shader language selection based on platform
-set(SOKOL_SHDC_SLANG "glsl430:hlsl5:metal_macos")
+set(SOKOL_SHDC_SLANG "glsl430:hlsl5:metal_macos:spirv_vk")
 
 # Function to compile sokol shaders
 function(add_sokol_shader TARGET SHADER_SOURCE)
@@ -66,15 +66,20 @@ target_link_libraries(vrm_viewer PRIVATE vrm_h sokol hmm stb)
 
 # Compile shaders
 add_sokol_shader(vrm_viewer shader/mesh.glsl)
+add_sokol_shader(vrm_viewer shader/pbr.glsl)
+add_sokol_shader(vrm_viewer shader/skybox.glsl)
+add_sokol_shader(vrm_viewer shader/toon.glsl)
 
 # Platform-specific settings
 if(WIN32)
     # For D3D11 backend on Windows
-    target_compile_definitions(vrm_viewer PRIVATE SOKOL_D3D11)
+#    target_compile_definitions(vrm_viewer PRIVATE SOKOL_D3D11)
+    target_compile_definitions(vrm_viewer PRIVATE SOKOL_GLCORE)
     target_link_libraries(vrm_viewer PRIVATE
         d3d11
         dxgi
     )
+    target_compile_options(vrm_viewer PUBLIC $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<NOT:$<COMPILE_LANGUAGE:CUDA>>>:/wd4819>)
 elseif(APPLE)
     # For Metal backend on macOS
     target_compile_definitions(vrm_viewer PRIVATE SOKOL_METAL)
@@ -97,3 +102,7 @@ else()
         m
     )
 endif()
+add_custom_command(
+    TARGET vrm_viewer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ARGS "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${CMAKE_CURRENT_BINARY_DIR}/assets"
+)
