@@ -1,5 +1,6 @@
-// Skybox shader for displaying prefiltered environment map
-// Compile with: sokol-shdc --input skybox.glsl --output skybox.glsl.h --slang hlsl5:glsl430:metal_macos
+// Skybox shader for displaying environment map with LOD control
+// LOD 0: Original environment map
+// LOD 1-5: Prefilter map with increasing roughness (mip levels)
 
 @module skybox
 
@@ -27,8 +28,11 @@ void main() {
 layout(binding=0) uniform textureCube environment_map;
 layout(binding=0) uniform sampler env_smp;
 
+layout(binding=1) uniform textureCube prefilter_map;
+layout(binding=1) uniform sampler prefilter_smp;
+
 layout(binding=1) uniform fs_params {
-    float lod_level;
+    float lod_level;    // 0 = environment, 1-5 = prefilter mip levels
     float exposure;
     float _pad0;
     float _pad1;
@@ -56,13 +60,24 @@ vec3 linearToSRGB(vec3 c) {
 }
 
 void main() {
-    vec3 env_color = textureLod(samplerCube(environment_map, env_smp), v_world_pos, lod_level).rgb;
+    vec3 env_color;
+    
+    if (lod_level < 0.5) {
+        // LOD 0: Use original environment map (no mip, full quality)
+        env_color = textureLod(samplerCube(environment_map, env_smp), v_world_pos, 0.0).rgb;
+    } else {
+        // LOD 1-5: Use prefilter map with corresponding mip level
+        // Map lod_level 1-5 to mip level 0-4
+        float mip = lod_level - 1.0;
+        env_color = textureLod(samplerCube(prefilter_map, prefilter_smp), v_world_pos, mip).rgb;
+    }
     
     // Apply exposure
     env_color *= exposure;
     
     // ACES Filmic tonemapping
     env_color = ACESFilm(env_color);
+    
     // Convert linear to sRGB for display
     env_color = linearToSRGB(env_color);
     

@@ -310,7 +310,7 @@ static Clay_RenderCommandArray create_gui_layout(GuiState* state) {
                 
                 gui_render_toggle(100, "Skybox", &state->show_skybox);
                 gui_render_slider(101, "Exposure", &state->skybox_exposure, 0.1f, 5.0f, "%.2f");
-                gui_render_slider(102, "LOD", &state->skybox_lod, 0.0f, 4.0f, "%.1f");
+                gui_render_slider(102, "LOD", &state->skybox_lod, 0.0f, 5.0f, "%.0f");  // 0=env, 1-5=prefilter mips
             }
             
             // Toon settings

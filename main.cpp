@@ -1449,8 +1449,12 @@ static void frame() {
         sg_bindings skybox_bind = {};
         skybox_bind.vertex_buffers[0] = state.skybox_vertex_buffer;
         skybox_bind.index_buffer = state.skybox_index_buffer;
-        skybox_bind.views[VIEW_skybox_environment_map] = state.hdr_environment_view;  // Use environment cubemap for skybox
+        // Environment map (LOD 0)
+        skybox_bind.views[VIEW_skybox_environment_map] = state.hdr_environment_view;
         skybox_bind.samplers[SMP_skybox_env_smp] = state.smp;
+        // Prefilter map (LOD 1-5)
+        skybox_bind.views[VIEW_skybox_prefilter_map] = state.prefilter_map_view;
+        skybox_bind.samplers[SMP_skybox_prefilter_smp] = state.smp;
         sg_apply_bindings(&skybox_bind);
         
         // Skybox uses view matrix without translation
@@ -1757,11 +1761,11 @@ static void event(const sapp_event* ev) {
                 // Decrease exposure
                 state.skybox_exposure = HMM_MAX(state.skybox_exposure - 0.1f, 0.1f);
             } else if (ev->key_code == SAPP_KEYCODE_LEFT_BRACKET) {
-                // Decrease LOD
-                state.skybox_lod = HMM_MAX(state.skybox_lod - 0.5f, 0.0f);
+                // Decrease LOD (0 = environment, 1-5 = prefilter mips)
+                state.skybox_lod = HMM_MAX(state.skybox_lod - 1.0f, 0.0f);
             } else if (ev->key_code == SAPP_KEYCODE_RIGHT_BRACKET) {
                 // Increase LOD
-                state.skybox_lod = HMM_MIN(state.skybox_lod + 0.5f, 4.0f);
+                state.skybox_lod = HMM_MIN(state.skybox_lod + 1.0f, 5.0f);
             }
             break;
             
