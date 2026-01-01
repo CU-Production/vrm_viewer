@@ -302,48 +302,98 @@ static sg_image load_texture_from_file(const char* base_path, const char* uri) {
 }
 
 // ============================================================================
-// HDR Loading and IBL
+// HDR Loading and IBL (using HandmadeMath for vector operations)
 // ============================================================================
 
-// Sample equirectangular HDR texture
-static void sample_equirectangular(const float* hdr_data, int width, int height, 
-                                    float theta, float phi, float* out_rgb) {
-    // Convert spherical coordinates to UV
-    float u = phi / (2.0f * 3.14159265359f);
-    float v = theta / 3.14159265359f;
+// Sample equirectangular HDR texture with bilinear filtering
+// dir: normalized direction vector in world space
+static HMM_Vec3 sample_equirectangular(const float* hdr_data, int width, int height, HMM_Vec3 dir) {
+    // Convert direction to spherical coordinates
+    // theta: polar angle from +Y axis (0 = top, PI = bottom)
+    // phi: azimuthal angle around Y axis
+    float theta = acosf(HMM_Clamp(-1.0f, dir.Y, 1.0f));  // [0, PI]
+    float phi = atan2f(dir.X, -dir.Z);  // [-PI, PI], note: -Z is forward
     
-    // Clamp to valid range
-    u = fmodf(u + 1.0f, 1.0f);
-    v = fmaxf(0.0f, fminf(1.0f, v));
+    // Convert to UV coordinates
+    float u = (phi + HMM_PI32) / (2.0f * HMM_PI32);  // [0, 1]
+    float v = theta / HMM_PI32;  // [0, 1]
     
-    // Sample with bilinear filtering
-    float x = u * width;
-    float y = v * height;
-    int x0 = (int)floorf(x);
-    int y0 = (int)floorf(y);
-    int x1 = (x0 + 1) % width;
-    int y1 = fminf(y0 + 1, height - 1);
+    // Bilinear filtering with proper wrap/clamp
+    float px = u * width - 0.5f;
+    float py = v * height - 0.5f;
     
-    float fx = x - x0;
-    float fy = y - y0;
+    // Wrap helper for horizontal (longitude wraps around)
+    auto wrap_x = [width](int x) -> int {
+        return ((x % width) + width) % width;
+    };
     
-    // Sample 4 pixels
-    int idx00 = (y0 * width + x0) * 3;
-    int idx10 = (y0 * width + x1) * 3;
-    int idx01 = (y1 * width + x0) * 3;
-    int idx11 = (y1 * width + x1) * 3;
+    // Clamp helper for vertical (latitude clamps at poles)
+    auto clamp_y = [height](int y) -> int {
+        return HMM_Clamp(0, y, height - 1);
+    };
     
-    // Bilinear interpolation
-    for (int c = 0; c < 3; c++) {
-        float v00 = hdr_data[idx00 + c];
-        float v10 = hdr_data[idx10 + c];
-        float v01 = hdr_data[idx01 + c];
-        float v11 = hdr_data[idx11 + c];
-        
-        float v0 = v00 * (1.0f - fx) + v10 * fx;
-        float v1 = v01 * (1.0f - fx) + v11 * fx;
-        out_rgb[c] = v0 * (1.0f - fy) + v1 * fy;
+    int x0 = (int)floorf(px);
+    int y0 = (int)floorf(py);
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+    
+    float fx = px - x0;
+    float fy = py - y0;
+    
+    // Sample 4 pixels with wrap/clamp
+    auto sample_pixel = [&](int x, int y) -> HMM_Vec3 {
+        int sx = wrap_x(x);
+        int sy = clamp_y(y);
+        int idx = (sy * width + sx) * 3;
+        return HMM_V3(hdr_data[idx], hdr_data[idx + 1], hdr_data[idx + 2]);
+    };
+    
+    HMM_Vec3 c00 = sample_pixel(x0, y0);
+    HMM_Vec3 c10 = sample_pixel(x1, y0);
+    HMM_Vec3 c01 = sample_pixel(x0, y1);
+    HMM_Vec3 c11 = sample_pixel(x1, y1);
+    
+    // Bilinear interpolation using HMM_LerpV3
+    HMM_Vec3 c0 = HMM_LerpV3(c00, fx, c10);
+    HMM_Vec3 c1 = HMM_LerpV3(c01, fx, c11);
+    return HMM_LerpV3(c0, fy, c1);
+}
+
+// Get cubemap face direction from face index and UV coordinates
+// UV is in [-1, 1] range, returns normalized direction vector
+static HMM_Vec3 get_cubemap_direction(int face, float u, float v) {
+    HMM_Vec3 dir;
+    switch (face) {
+        case 0: dir = HMM_V3( 1.0f, -v, -u); break;  // +X
+        case 1: dir = HMM_V3(-1.0f, -v,  u); break;  // -X
+        case 2: dir = HMM_V3( u,  1.0f,  v); break;  // +Y
+        case 3: dir = HMM_V3( u, -1.0f, -v); break;  // -Y
+        case 4: dir = HMM_V3( u, -v,  1.0f); break;  // +Z
+        case 5: dir = HMM_V3(-u, -v, -1.0f); break;  // -Z
+        default: dir = HMM_V3(0, 0, 1); break;
     }
+    return HMM_NormV3(dir);
+}
+
+// Build orthonormal tangent space basis from normal vector
+static void build_tangent_space(HMM_Vec3 N, HMM_Vec3* T, HMM_Vec3* B) {
+    // Choose an up vector that's not parallel to N
+    HMM_Vec3 up = (fabsf(N.Y) < 0.999f) ? HMM_V3(0, 1, 0) : HMM_V3(1, 0, 0);
+    *B = HMM_NormV3(HMM_Cross(N, up));
+    *T = HMM_Cross(*B, N);
+}
+
+// Transform tangent space direction to world space
+static HMM_Vec3 tangent_to_world(HMM_Vec3 local, HMM_Vec3 T, HMM_Vec3 B, HMM_Vec3 N) {
+    return HMM_AddV3(HMM_AddV3(
+        HMM_MulV3F(T, local.X),
+        HMM_MulV3F(B, local.Y)),
+        HMM_MulV3F(N, local.Z));
+}
+
+// Reflect vector V around normal N
+static HMM_Vec3 reflect(HMM_Vec3 V, HMM_Vec3 N) {
+    return HMM_SubV3(HMM_MulV3F(N, 2.0f * HMM_DotV3(V, N)), V);
 }
 
 // Convert equirectangular HDR to cubemap
@@ -351,70 +401,24 @@ static sg_image equirectangular_to_cubemap(const float* hdr_data, int hdr_width,
     const int face_size = cubemap_size * cubemap_size * 4;  // RGBA32F per face
     std::vector<float> cubemap_data(face_size * 6);  // 6 faces
     
-    // Cubemap face directions: +X, -X, +Y, -Y, +Z, -Z
-    float face_dirs[6][3] = {
-        { 1.0f,  0.0f,  0.0f},  // +X
-        {-1.0f,  0.0f,  0.0f},  // -X
-        { 0.0f,  1.0f,  0.0f},  // +Y
-        { 0.0f, -1.0f,  0.0f},  // -Y
-        { 0.0f,  0.0f,  1.0f},  // +Z
-        { 0.0f,  0.0f, -1.0f}   // -Z
-    };
-    
-    float face_up[6][3] = {
-        { 0.0f, -1.0f,  0.0f},  // +X
-        { 0.0f, -1.0f,  0.0f},  // -X
-        { 0.0f,  0.0f,  1.0f},  // +Y
-        { 0.0f,  0.0f, -1.0f},  // -Y
-        { 0.0f, -1.0f,  0.0f},  // +Z
-        { 0.0f, -1.0f,  0.0f}   // -Z
-    };
-    
-    // Process each pixel in parallel (6 faces * size * size pixels)
     parallelutil::parallel_for_2d(6 * cubemap_size, cubemap_size, [&](int face_y, int x) {
         int face = face_y / cubemap_size;
         int y = face_y % cubemap_size;
         float* face_data = cubemap_data.data() + face * face_size;
         
-        // Convert cubemap UV to world direction
+        // Convert pixel coordinates to UV in [-1, 1] range
         float u = (x + 0.5f) / cubemap_size * 2.0f - 1.0f;
         float v = (y + 0.5f) / cubemap_size * 2.0f - 1.0f;
         
-        // Get face direction vectors
-        float right[3], up[3], forward[3];
-        memcpy(forward, face_dirs[face], sizeof(float) * 3);
-        memcpy(up, face_up[face], sizeof(float) * 3);
+        // Get direction and sample HDR
+        HMM_Vec3 dir = get_cubemap_direction(face, u, v);
+        HMM_Vec3 color = sample_equirectangular(hdr_data, hdr_width, hdr_height, dir);
         
-        // Calculate right vector
-        right[0] = up[1] * forward[2] - up[2] * forward[1];
-        right[1] = up[2] * forward[0] - up[0] * forward[2];
-        right[2] = up[0] * forward[1] - up[1] * forward[0];
-        
-        // Calculate world direction
-        float dir[3];
-        dir[0] = forward[0] + right[0] * u + up[0] * v;
-        dir[1] = forward[1] + right[1] * u + up[1] * v;
-        dir[2] = forward[2] + right[2] * u + up[2] * v;
-        
-        // Normalize
-        float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-        dir[0] /= len;
-        dir[1] /= len;
-        dir[2] /= len;
-        
-        // Convert to spherical coordinates
-        float theta = acosf(fmaxf(-1.0f, fminf(1.0f, dir[1])));  // [0, PI]
-        float phi = atan2f(dir[0], dir[2]) + 3.14159265359f;     // [0, 2*PI]
-        
-        // Sample equirectangular texture
-        float rgb[3];
-        sample_equirectangular(hdr_data, hdr_width, hdr_height, theta, phi, rgb);
-        
-        // Store HDR values directly (preserve full dynamic range)
+        // Store HDR values
         int idx = (y * cubemap_size + x) * 4;
-        face_data[idx + 0] = rgb[0];
-        face_data[idx + 1] = rgb[1];
-        face_data[idx + 2] = rgb[2];
+        face_data[idx + 0] = color.X;
+        face_data[idx + 1] = color.Y;
+        face_data[idx + 2] = color.Z;
         face_data[idx + 3] = 1.0f;
     });
     
@@ -423,7 +427,7 @@ static sg_image equirectangular_to_cubemap(const float* hdr_data, int hdr_width,
     desc.width = cubemap_size;
     desc.height = cubemap_size;
     desc.num_slices = 6;
-    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;  // Use 32-bit float to preserve HDR range
+    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
     desc.data.mip_levels[0] = { cubemap_data.data(), cubemap_data.size() * sizeof(float) };
     desc.label = "environment-cubemap";
     return sg_make_image(&desc);
@@ -434,18 +438,6 @@ static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, in
     const int face_size = size * size * 4;
     std::vector<float> irradiance_data(face_size * 6);
     
-    float face_dirs[6][3] = {
-        { 1.0f,  0.0f,  0.0f}, {-1.0f,  0.0f,  0.0f},
-        { 0.0f,  1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f},
-        { 0.0f,  0.0f,  1.0f}, { 0.0f,  0.0f, -1.0f}
-    };
-    
-    float face_up[6][3] = {
-        { 0.0f, -1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f},
-        { 0.0f,  0.0f,  1.0f}, { 0.0f,  0.0f, -1.0f},
-        { 0.0f, -1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f}
-    };
-    
     parallelutil::parallel_for_2d(6 * size, size, [&](int face_y, int x) {
         int face = face_y / size;
         int y = face_y % size;
@@ -453,85 +445,48 @@ static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, in
         
         float u = (x + 0.5f) / size * 2.0f - 1.0f;
         float v = (y + 0.5f) / size * 2.0f - 1.0f;
-            
-            float right[3], up[3], forward[3];
-            memcpy(forward, face_dirs[face], sizeof(float) * 3);
-            memcpy(up, face_up[face], sizeof(float) * 3);
-            
-            right[0] = up[1] * forward[2] - up[2] * forward[1];
-            right[1] = up[2] * forward[0] - up[0] * forward[2];
-            right[2] = up[0] * forward[1] - up[1] * forward[0];
-            
-            float N[3];
-            N[0] = forward[0] + right[0] * u + up[0] * v;
-            N[1] = forward[1] + right[1] * u + up[1] * v;
-            N[2] = forward[2] + right[2] * u + up[2] * v;
-            
-            float len = sqrtf(N[0] * N[0] + N[1] * N[1] + N[2] * N[2]);
-            N[0] /= len; N[1] /= len; N[2] /= len;
-            
-            // Sample hemisphere around normal
-            float irradiance[3] = {0.0f, 0.0f, 0.0f};
-            const int num_samples = 64;
-            std::mt19937 rng(static_cast<unsigned int>(face * size * size + y * size + x));
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            
-            for (int i = 0; i < num_samples; i++) {
-                float Xi1 = dist(rng);
-                float Xi2 = dist(rng);
-                
-                // Cosine-weighted hemisphere sampling
-                float phi = 2.0f * 3.14159265359f * Xi1;
-                float cosTheta = sqrtf(Xi2);
-                float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
-                
-                float tangent[3];
-                if (fabsf(N[0]) < 0.9f) {
-                    tangent[0] = 1.0f; tangent[1] = 0.0f; tangent[2] = 0.0f;
-                } else {
-                    tangent[0] = 0.0f; tangent[1] = 1.0f; tangent[2] = 0.0f;
-                }
-                
-                float bitangent[3];
-                bitangent[0] = N[1] * tangent[2] - N[2] * tangent[1];
-                bitangent[1] = N[2] * tangent[0] - N[0] * tangent[2];
-                bitangent[2] = N[0] * tangent[1] - N[1] * tangent[0];
-                len = sqrtf(bitangent[0] * bitangent[0] + bitangent[1] * bitangent[1] + bitangent[2] * bitangent[2]);
-                bitangent[0] /= len; bitangent[1] /= len; bitangent[2] /= len;
-                
-                float tangent2[3];
-                tangent2[0] = N[1] * bitangent[2] - N[2] * bitangent[1];
-                tangent2[1] = N[2] * bitangent[0] - N[0] * bitangent[2];
-                tangent2[2] = N[0] * bitangent[1] - N[1] * bitangent[0];
-                
-                float L[3];
-                L[0] = tangent2[0] * sinTheta * cosf(phi) + bitangent[0] * sinTheta * sinf(phi) + N[0] * cosTheta;
-                L[1] = tangent2[1] * sinTheta * cosf(phi) + bitangent[1] * sinTheta * sinf(phi) + N[1] * cosTheta;
-                L[2] = tangent2[2] * sinTheta * cosf(phi) + bitangent[2] * sinTheta * sinf(phi) + N[2] * cosTheta;
-                
-                float theta = acosf(fmaxf(-1.0f, fminf(1.0f, L[1])));
-                float phi_dir = atan2f(L[0], L[2]) + 3.14159265359f;
-                
-                float sample_rgb[3];
-                sample_equirectangular(hdr_data, hdr_width, hdr_height, theta, phi_dir, sample_rgb);
-                
-                irradiance[0] += sample_rgb[0] * cosTheta;
-                irradiance[1] += sample_rgb[1] * cosTheta;
-                irradiance[2] += sample_rgb[2] * cosTheta;
-            }
-            
-            irradiance[0] /= num_samples;
-            irradiance[1] /= num_samples;
-            irradiance[2] /= num_samples;
-        irradiance[0] *= 3.14159265359f;  // Multiply by PI for Lambertian
-        irradiance[1] *= 3.14159265359f;
-        irradiance[2] *= 3.14159265359f;
         
-        // Store HDR values directly (preserve full dynamic range)
+        // Get normal direction for this cubemap pixel
+        HMM_Vec3 N = get_cubemap_direction(face, u, v);
+        
+        // Build tangent space
+        HMM_Vec3 T, B;
+        build_tangent_space(N, &T, &B);
+        
+        // Sample hemisphere around normal
+        HMM_Vec3 irradiance = HMM_V3(0, 0, 0);
+        const int num_samples = 64;
+        std::mt19937 rng(static_cast<unsigned int>(face * size * size + y * size + x));
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        
+        for (int i = 0; i < num_samples; i++) {
+            float Xi1 = dist(rng);
+            float Xi2 = dist(rng);
+            
+            // Cosine-weighted hemisphere sampling
+            float phi = 2.0f * HMM_PI32 * Xi1;
+            float cosTheta = sqrtf(Xi2);
+            float sinTheta = sqrtf(1.0f - Xi2);
+            
+            // Local direction in tangent space
+            HMM_Vec3 local_dir = HMM_V3(sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta);
+            
+            // Transform to world space
+            HMM_Vec3 L = HMM_NormV3(tangent_to_world(local_dir, T, B, N));
+            
+            // Sample environment and accumulate
+            HMM_Vec3 sample_color = sample_equirectangular(hdr_data, hdr_width, hdr_height, L);
+            irradiance = HMM_AddV3(irradiance, sample_color);
+        }
+        
+        // Average samples
+        irradiance = HMM_MulV3F(irradiance, 1.0f / num_samples);
+        
+        // Store HDR values
         int idx = (y * size + x) * 4;
-        face_data[idx + 0] = irradiance[0];
-        face_data[idx + 1] = irradiance[1];
-        face_data[idx + 2] = irradiance[2];
+        face_data[idx + 0] = irradiance.X;
+        face_data[idx + 1] = irradiance.Y;
+        face_data[idx + 2] = irradiance.Z;
         face_data[idx + 3] = 1.0f;
     });
     
@@ -540,28 +495,16 @@ static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, in
     desc.width = size;
     desc.height = size;
     desc.num_slices = 6;
-    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;  // Use 32-bit float to preserve HDR range
+    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
     desc.data.mip_levels[0] = { irradiance_data.data(), irradiance_data.size() * sizeof(float) };
     desc.label = "irradiance-map";
     return sg_make_image(&desc);
 }
 
-// Generate prefilter map with mipmaps
+// Generate prefilter map with importance sampling
 static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int hdr_height, int size) {
     const int face_size = size * size * 4;
     std::vector<float> prefilter_data(face_size * 6);
-    
-    float face_dirs[6][3] = {
-        { 1.0f,  0.0f,  0.0f}, {-1.0f,  0.0f,  0.0f},
-        { 0.0f,  1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f},
-        { 0.0f,  0.0f,  1.0f}, { 0.0f,  0.0f, -1.0f}
-    };
-    
-    float face_up[6][3] = {
-        { 0.0f, -1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f},
-        { 0.0f,  0.0f,  1.0f}, { 0.0f,  0.0f, -1.0f},
-        { 0.0f, -1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f}
-    };
     
     parallelutil::parallel_for_2d(6 * size, size, [&](int face_y, int x) {
         int face = face_y / size;
@@ -570,98 +513,60 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
         
         float u = (x + 0.5f) / size * 2.0f - 1.0f;
         float v = (y + 0.5f) / size * 2.0f - 1.0f;
+        
+        // Get reflection direction (also used as normal and view)
+        HMM_Vec3 R = get_cubemap_direction(face, u, v);
+        
+        // Build tangent space around R
+        HMM_Vec3 T, B;
+        build_tangent_space(R, &T, &B);
+        
+        // For prefilter map, use low roughness (base mip level)
+        float roughness = 0.1f;
+        float a = roughness * roughness;
+        
+        // Importance sampling for specular IBL
+        HMM_Vec3 prefiltered = HMM_V3(0, 0, 0);
+        float total_weight = 0.0f;
+        const int num_samples = 64;
+        std::mt19937 rng(static_cast<unsigned int>(face * size * size + y * size + x));
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        
+        for (int i = 0; i < num_samples; i++) {
+            float Xi1 = dist(rng);
+            float Xi2 = dist(rng);
             
-            float right[3], up[3], forward[3];
-            memcpy(forward, face_dirs[face], sizeof(float) * 3);
-            memcpy(up, face_up[face], sizeof(float) * 3);
+            // GGX importance sampling
+            float phi = 2.0f * HMM_PI32 * Xi1;
+            float cosTheta = sqrtf((1.0f - Xi2) / (1.0f + (a * a - 1.0f) * Xi2));
+            float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
             
-            right[0] = up[1] * forward[2] - up[2] * forward[1];
-            right[1] = up[2] * forward[0] - up[0] * forward[2];
-            right[2] = up[0] * forward[1] - up[1] * forward[0];
+            // Half vector in tangent space
+            HMM_Vec3 H_local = HMM_V3(sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta);
             
-            float R[3];
-            R[0] = forward[0] + right[0] * u + up[0] * v;
-            R[1] = forward[1] + right[1] * u + up[1] * v;
-            R[2] = forward[2] + right[2] * u + up[2] * v;
+            // Transform to world space
+            HMM_Vec3 H = tangent_to_world(H_local, T, B, R);
             
-            float len = sqrtf(R[0] * R[0] + R[1] * R[1] + R[2] * R[2]);
-            R[0] /= len; R[1] /= len; R[2] /= len;
+            // Compute light direction (reflect V around H, where V = R)
+            HMM_Vec3 L = HMM_NormV3(reflect(R, H));
             
-            // Calculate roughness from mip level (simplified - using single mip for now)
-            float roughness = 0.0f;  // Base mip level
-            
-            // Importance sampling for specular IBL
-            float prefiltered[3] = {0.0f, 0.0f, 0.0f};
-            const int num_samples = 32;
-            float total_weight = 0.0f;
-            std::mt19937 rng(static_cast<unsigned int>(face * size * size + y * size + x));
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            
-            for (int i = 0; i < num_samples; i++) {
-                float Xi1 = dist(rng);
-                float Xi2 = dist(rng);
-                
-                // Importance sampling with GGX distribution
-                float phi = 2.0f * 3.14159265359f * Xi1;
-                float cosTheta = sqrtf((1.0f - Xi2) / (1.0f + (roughness * roughness - 1.0f) * Xi2));
-                float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
-                
-                float H[3];
-                H[0] = cosf(phi) * sinTheta;
-                H[1] = sinf(phi) * sinTheta;
-                H[2] = cosTheta;
-                
-                // Transform to world space
-                float tangent[3];
-                if (fabsf(R[0]) < 0.9f) {
-                    tangent[0] = 1.0f; tangent[1] = 0.0f; tangent[2] = 0.0f;
-                } else {
-                    tangent[0] = 0.0f; tangent[1] = 1.0f; tangent[2] = 0.0f;
-                }
-                
-                float bitangent[3];
-                bitangent[0] = R[1] * tangent[2] - R[2] * tangent[1];
-                bitangent[1] = R[2] * tangent[0] - R[0] * tangent[2];
-                bitangent[2] = R[0] * tangent[1] - R[1] * tangent[0];
-                len = sqrtf(bitangent[0] * bitangent[0] + bitangent[1] * bitangent[1] + bitangent[2] * bitangent[2]);
-                bitangent[0] /= len; bitangent[1] /= len; bitangent[2] /= len;
-                
-                float tangent2[3];
-                tangent2[0] = R[1] * bitangent[2] - R[2] * bitangent[1];
-                tangent2[1] = R[2] * bitangent[0] - R[0] * bitangent[2];
-                tangent2[2] = R[0] * bitangent[1] - R[1] * bitangent[0];
-                
-                float L[3];
-                L[0] = tangent2[0] * H[0] + bitangent[0] * H[1] + R[0] * H[2];
-                L[1] = tangent2[1] * H[0] + bitangent[1] * H[1] + R[1] * H[2];
-                L[2] = tangent2[2] * H[0] + bitangent[2] * H[1] + R[2] * H[2];
-                
-                float NdotL = fmaxf(0.0f, L[0] * R[0] + L[1] * R[1] + L[2] * R[2]);
-                if (NdotL > 0.0f) {
-                    float theta = acosf(fmaxf(-1.0f, fminf(1.0f, L[1])));
-                    float phi_dir = atan2f(L[0], L[2]) + 3.14159265359f;
-                    
-                    float sample_rgb[3];
-                    sample_equirectangular(hdr_data, hdr_width, hdr_height, theta, phi_dir, sample_rgb);
-                    
-                    prefiltered[0] += sample_rgb[0] * NdotL;
-                    prefiltered[1] += sample_rgb[1] * NdotL;
-                    prefiltered[2] += sample_rgb[2] * NdotL;
-                    total_weight += NdotL;
-                }
+            float NdotL = HMM_MAX(0.0f, HMM_DotV3(R, L));
+            if (NdotL > 0.0f) {
+                HMM_Vec3 sample_color = sample_equirectangular(hdr_data, hdr_width, hdr_height, L);
+                prefiltered = HMM_AddV3(prefiltered, HMM_MulV3F(sample_color, NdotL));
+                total_weight += NdotL;
             }
-            
-        if (total_weight > 0.0f) {
-            prefiltered[0] /= total_weight;
-            prefiltered[1] /= total_weight;
-            prefiltered[2] /= total_weight;
         }
         
-        // Store HDR values directly (preserve full dynamic range)
+        if (total_weight > 0.0f) {
+            prefiltered = HMM_MulV3F(prefiltered, 1.0f / total_weight);
+        }
+        
+        // Store HDR values
         int idx = (y * size + x) * 4;
-        face_data[idx + 0] = prefiltered[0];
-        face_data[idx + 1] = prefiltered[1];
-        face_data[idx + 2] = prefiltered[2];
+        face_data[idx + 0] = prefiltered.X;
+        face_data[idx + 1] = prefiltered.Y;
+        face_data[idx + 2] = prefiltered.Z;
         face_data[idx + 3] = 1.0f;
     });
     
@@ -670,7 +575,7 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
     desc.width = size;
     desc.height = size;
     desc.num_slices = 6;
-    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;  // Use 32-bit float to preserve HDR range
+    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
     desc.data.mip_levels[0] = { prefilter_data.data(), prefilter_data.size() * sizeof(float) };
     desc.label = "prefilter-map";
     return sg_make_image(&desc);
@@ -678,7 +583,7 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
 
 static sg_image load_hdr_texture(const char* filepath) {
     int width, height, channels;
-    stbi_set_flip_vertically_on_load(1);
+    stbi_set_flip_vertically_on_load(0);  // Don't flip HDR - standard is V=0 at top
     float* hdr_data = stbi_loadf(filepath, &width, &height, &channels, 3);
     if (!hdr_data) {
         log_message(("Failed to load HDR: " + std::string(filepath)).c_str());
@@ -712,16 +617,14 @@ static sg_image generate_brdf_lut() {
     const int size = 512;
     std::vector<float> lut_data(size * size * 2);
     
-    // Use parallel_for_2d to parallelize the computation
     parallelutil::parallel_for_2d(size, size, [&](int x, int y) {
         float NdotV = (x + 0.5f) / size;
         float roughness = (y + 0.5f) / size;
         
-        float V[3] = { sqrtf(1.0f - NdotV * NdotV), 0.0f, NdotV };
+        // View vector in tangent space (N = (0,0,1))
+        HMM_Vec3 V = HMM_V3(sqrtf(1.0f - NdotV * NdotV), 0.0f, NdotV);
         float A = 0.0f, B = 0.0f;
         
-        // Use deterministic random number generator based on pixel position
-        // This ensures reproducible results and thread safety
         std::mt19937 rng(static_cast<unsigned int>(x * size + y));
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         
@@ -730,24 +633,23 @@ static sg_image generate_brdf_lut() {
             float Xi1 = dist(rng);
             float Xi2 = dist(rng);
             
-            float phi = 2.0f * 3.14159265359f * Xi1;
-            float cosTheta = sqrtf((1.0f - Xi2) / (1.0f + (roughness * roughness - 1.0f) * Xi2));
+            // GGX importance sampling
+            float a = roughness * roughness;
+            float phi = 2.0f * HMM_PI32 * Xi1;
+            float cosTheta = sqrtf((1.0f - Xi2) / (1.0f + (a * a - 1.0f) * Xi2));
             float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
             
-            float H[3] = {
-                cosf(phi) * sinTheta,
-                sinf(phi) * sinTheta,
-                cosTheta
-            };
+            // Half vector in tangent space
+            HMM_Vec3 H = HMM_V3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
             
-            float NdotH = H[2];
-            float VdotH = V[0] * H[0] + V[1] * H[1] + V[2] * H[2];
+            float NdotH = H.Z;  // N = (0,0,1) in tangent space
+            float VdotH = HMM_DotV3(V, H);
             
             if (NdotH > 0.0f && VdotH > 0.0f) {
-                float G = 2.0f * NdotH / VdotH;
-                G = fminf(G, 1.0f);
+                // Simplified geometry term
+                float G = HMM_MIN(2.0f * NdotH / VdotH, 1.0f);
                 float G_Vis = G * VdotH / (NdotH * NdotV);
-                float Fc = powf(std::max(1.0f - VdotH, 0.0f), 5.0f);
+                float Fc = powf(HMM_MAX(1.0f - VdotH, 0.0f), 5.0f);
                 A += (1.0f - Fc) * G_Vis;
                 B += Fc * G_Vis;
             }
@@ -757,11 +659,11 @@ static sg_image generate_brdf_lut() {
         lut_data[(y * size + x) * 2 + 1] = B / num_samples;
     });
     
-    // Convert to RG16F format (simplified - using RGBA8)
+    // Convert to RGBA8 format
     std::vector<uint8_t> rgba_data(size * size * 4);
     for (int i = 0; i < size * size; i++) {
-        rgba_data[i * 4 + 0] = (uint8_t)(fminf(lut_data[i * 2 + 0] * 255.0f, 255.0f));
-        rgba_data[i * 4 + 1] = (uint8_t)(fminf(lut_data[i * 2 + 1] * 255.0f, 255.0f));
+        rgba_data[i * 4 + 0] = (uint8_t)HMM_MIN(lut_data[i * 2 + 0] * 255.0f, 255.0f);
+        rgba_data[i * 4 + 1] = (uint8_t)HMM_MIN(lut_data[i * 2 + 1] * 255.0f, 255.0f);
         rgba_data[i * 4 + 2] = 0;
         rgba_data[i * 4 + 3] = 255;
     }
@@ -812,7 +714,7 @@ static sg_image create_simple_cubemap(uint8_t r, uint8_t g, uint8_t b) {
 static void create_ibl_maps(const char* hdr_filepath) {
     // Load HDR data
     int hdr_width, hdr_height, hdr_channels;
-    stbi_set_flip_vertically_on_load(1);
+    stbi_set_flip_vertically_on_load(0);  // Don't flip HDR - standard is V=0 at top
     float* hdr_data = stbi_loadf(hdr_filepath, &hdr_width, &hdr_height, &hdr_channels, 3);
     if (!hdr_data) {
         log_message(("Failed to load HDR for IBL: " + std::string(hdr_filepath)).c_str());

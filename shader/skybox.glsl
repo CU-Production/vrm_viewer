@@ -38,14 +38,24 @@ in vec3 v_world_pos;
 
 out vec4 frag_color;
 
+// ACES Filmic Tone Mapping
+vec3 ACESFilm(vec3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
 void main() {
     vec3 env_color = textureLod(samplerCube(environment_map, env_smp), v_world_pos, lod_level).rgb;
     
     // Apply exposure
     env_color *= exposure;
     
-    // HDR tonemapping
-    env_color = env_color / (env_color + vec3(1.0));
+    // ACES Filmic tonemapping
+    env_color = ACESFilm(env_color);
     // Gamma correction (ensure non-negative for pow)
     env_color = pow(max(env_color, vec3(0.0)), vec3(1.0 / 2.2));
     

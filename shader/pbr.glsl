@@ -77,6 +77,16 @@ out vec4 frag_color;
 
 const float PI = 3.14159265359;
 
+// ACES Filmic Tone Mapping
+vec3 ACESFilm(vec3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
 // Normal Distribution Function (GGX/Trowbridge-Reitz)
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
     float a = roughness * roughness;
@@ -177,8 +187,8 @@ void main() {
     
     vec3 color = ambient + Lo + emissive;
     
-    // HDR tonemapping
-    color = color / (color + vec3(1.0));
+    // ACES Filmic tonemapping
+    color = ACESFilm(color);
     // Gamma correction (ensure non-negative for pow)
     color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
     
