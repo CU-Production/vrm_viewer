@@ -379,6 +379,9 @@ void main() {
     
     // Output
     frag_color = vec4(color, alpha);
+
+    // Mainly from BaseColor
+    frag_color = mix(frag_color, baseColorSample, 0.9);
 }
 @end
 
