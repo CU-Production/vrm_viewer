@@ -27,6 +27,9 @@
 #include <string>
 #include <cstdio>
 #include <cmath>
+#include <random>
+#include <thread>
+#include "parallel-util.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -332,51 +335,55 @@ static sg_image load_hdr_texture(const char* filepath) {
     return img;
 }
 
-// Generate BRDF LUT (simplified CPU version)
+// Generate BRDF LUT (parallelized CPU version)
 static sg_image generate_brdf_lut() {
     const int size = 512;
     std::vector<float> lut_data(size * size * 2);
     
-    for (int y = 0; y < size; y++) {
-        for (int x = 0; x < size; x++) {
-            float NdotV = (x + 0.5f) / size;
-            float roughness = (y + 0.5f) / size;
+    // Use parallel_for_2d to parallelize the computation
+    parallelutil::parallel_for_2d(size, size, [&](int x, int y) {
+        float NdotV = (x + 0.5f) / size;
+        float roughness = (y + 0.5f) / size;
+        
+        float V[3] = { sqrtf(1.0f - NdotV * NdotV), 0.0f, NdotV };
+        float A = 0.0f, B = 0.0f;
+        
+        // Use deterministic random number generator based on pixel position
+        // This ensures reproducible results and thread safety
+        std::mt19937 rng(static_cast<unsigned int>(x * size + y));
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        
+        const int num_samples = 1024;
+        for (int i = 0; i < num_samples; i++) {
+            float Xi1 = dist(rng);
+            float Xi2 = dist(rng);
             
-            float V[3] = { sqrtf(1.0f - NdotV * NdotV), 0.0f, NdotV };
-            float A = 0.0f, B = 0.0f;
+            float phi = 2.0f * 3.14159265359f * Xi1;
+            float cosTheta = sqrtf((1.0f - Xi2) / (1.0f + (roughness * roughness - 1.0f) * Xi2));
+            float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
             
-            const int num_samples = 1024;
-            for (int i = 0; i < num_samples; i++) {
-                float Xi1 = (float)rand() / RAND_MAX;
-                float Xi2 = (float)rand() / RAND_MAX;
-                
-                float phi = 2.0f * 3.14159265359f * Xi1;
-                float cosTheta = sqrtf((1.0f - Xi2) / (1.0f + (roughness * roughness - 1.0f) * Xi2));
-                float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
-                
-                float H[3] = {
-                    cosf(phi) * sinTheta,
-                    sinf(phi) * sinTheta,
-                    cosTheta
-                };
-                
-                float NdotH = H[2];
-                float VdotH = V[0] * H[0] + V[1] * H[1] + V[2] * H[2];
-                
-                if (NdotH > 0.0f && VdotH > 0.0f) {
-                    float G = 2.0f * NdotH / VdotH;
-                    G = fminf(G, 1.0f);
-                    float G_Vis = G * VdotH / (NdotH * NdotV);
-                    float Fc = powf(1.0f - VdotH, 5.0f);
-                    A += (1.0f - Fc) * G_Vis;
-                    B += Fc * G_Vis;
-                }
+            float H[3] = {
+                cosf(phi) * sinTheta,
+                sinf(phi) * sinTheta,
+                cosTheta
+            };
+            
+            float NdotH = H[2];
+            float VdotH = V[0] * H[0] + V[1] * H[1] + V[2] * H[2];
+            
+            if (NdotH > 0.0f && VdotH > 0.0f) {
+                float G = 2.0f * NdotH / VdotH;
+                G = fminf(G, 1.0f);
+                float G_Vis = G * VdotH / (NdotH * NdotV);
+                float Fc = powf(std::max(1.0f - VdotH, 0.0f), 5.0f);
+                A += (1.0f - Fc) * G_Vis;
+                B += Fc * G_Vis;
             }
-            
-            lut_data[(y * size + x) * 2 + 0] = A / num_samples;
-            lut_data[(y * size + x) * 2 + 1] = B / num_samples;
         }
-    }
+        
+        lut_data[(y * size + x) * 2 + 0] = A / num_samples;
+        lut_data[(y * size + x) * 2 + 1] = B / num_samples;
+    });
     
     // Convert to RG16F format (simplified - using RGBA8)
     std::vector<uint8_t> rgba_data(size * size * 4);
