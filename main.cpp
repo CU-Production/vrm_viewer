@@ -1,7 +1,6 @@
 // VRM/GLTF/GLB Viewer using Sokol
 // A simple 3D model viewer for VRM, GLTF, and GLB files
 
-#define HANDMADE_MATH_USE_DEGREES
 #include "HandmadeMath.h"
 
 #include "sokol_app.h"
@@ -45,6 +44,7 @@
 #include "shader/pbr.glsl.h"
 #include "shader/skybox.glsl.h"
 #include "shader/toon.glsl.h"
+#include "shader/sphere.glsl.h"
 
 // ============================================================================
 // Mesh structure for rendering
@@ -108,6 +108,7 @@ static struct {
     sg_pipeline pbr_pip;
     sg_pipeline toon_pip;
     sg_pipeline skybox_pip;
+    sg_pipeline sphere_pip;  // Simple PBR for material preview spheres
     
     // Default textures
     sg_image default_texture;
@@ -130,6 +131,11 @@ static struct {
     // Skybox
     sg_buffer skybox_vertex_buffer;
     sg_buffer skybox_index_buffer;
+    
+    // Material preview spheres (shown before model is loaded)
+    sg_buffer sphere_vertex_buffer;
+    sg_buffer sphere_index_buffer;
+    int sphere_num_indices;
     
     Model model;
     bool model_loaded;
@@ -174,6 +180,75 @@ static struct {
 
 static void log_message(const char* msg) {
     printf("[VRM Viewer] %s\n", msg);
+}
+
+// ============================================================================
+// Sphere geometry generation for material preview
+// ============================================================================
+
+struct SphereGeometry {
+    std::vector<float> vertices;  // pos(3) + normal(3) + uv(2) = 8 floats per vertex
+    std::vector<uint32_t> indices;
+};
+
+static SphereGeometry generate_sphere(int segments, int rings) {
+    SphereGeometry geo;
+    
+    // Generate vertices
+    for (int ring = 0; ring <= rings; ring++) {
+        float phi = HMM_PI32 * (float)ring / (float)rings;
+        float sinPhi = sinf(phi);
+        float cosPhi = cosf(phi);
+        
+        for (int seg = 0; seg <= segments; seg++) {
+            float theta = 2.0f * HMM_PI32 * (float)seg / (float)segments;
+            float sinTheta = sinf(theta);
+            float cosTheta = cosf(theta);
+            
+            // Position (unit sphere)
+            float x = cosTheta * sinPhi;
+            float y = cosPhi;
+            float z = sinTheta * sinPhi;
+            
+            // Normal (same as position for unit sphere)
+            float nx = x;
+            float ny = y;
+            float nz = z;
+            
+            // UV
+            float u = (float)seg / (float)segments;
+            float v = (float)ring / (float)rings;
+            
+            geo.vertices.push_back(x);
+            geo.vertices.push_back(y);
+            geo.vertices.push_back(z);
+            geo.vertices.push_back(nx);
+            geo.vertices.push_back(ny);
+            geo.vertices.push_back(nz);
+            geo.vertices.push_back(u);
+            geo.vertices.push_back(v);
+        }
+    }
+    
+    // Generate indices
+    for (int ring = 0; ring < rings; ring++) {
+        for (int seg = 0; seg < segments; seg++) {
+            int current = ring * (segments + 1) + seg;
+            int next = current + segments + 1;
+            
+            // First triangle
+            geo.indices.push_back(current);
+            geo.indices.push_back(next);
+            geo.indices.push_back(current + 1);
+            
+            // Second triangle
+            geo.indices.push_back(current + 1);
+            geo.indices.push_back(next);
+            geo.indices.push_back(next + 1);
+        }
+    }
+    
+    return geo;
 }
 
 // ============================================================================
@@ -629,17 +704,36 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
     return sg_make_image(&desc);
 }
 
+// Smith GGX geometry function for BRDF LUT
+static float GeometrySchlickGGX_IBL(float NdotV, float roughness) {
+    float a = roughness;
+    float k = (a * a) / 2.0f;  // k for IBL (different from direct lighting)
+    
+    float nom = NdotV;
+    float denom = NdotV * (1.0f - k) + k;
+    
+    return nom / denom;
+}
+
+static float GeometrySmith_IBL(float NdotV, float NdotL, float roughness) {
+    float ggx2 = GeometrySchlickGGX_IBL(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX_IBL(NdotL, roughness);
+    return ggx1 * ggx2;
+}
+
 // Generate BRDF LUT (parallelized CPU version)
 static sg_image generate_brdf_lut() {
     const int size = 512;
     std::vector<float> lut_data(size * size * 2);
     
     parallelutil::parallel_for_2d(size, size, [&](int x, int y) {
-        float NdotV = (x + 0.5f) / size;
-        float roughness = (y + 0.5f) / size;
+        float NdotV = HMM_MAX((x + 0.5f) / size, 0.001f);  // Avoid division by zero
+        float roughness = HMM_MAX((y + 0.5f) / size, 0.001f);
         
         // View vector in tangent space (N = (0,0,1))
         HMM_Vec3 V = HMM_V3(sqrtf(1.0f - NdotV * NdotV), 0.0f, NdotV);
+        HMM_Vec3 N = HMM_V3(0.0f, 0.0f, 1.0f);
+        
         float A = 0.0f, B = 0.0f;
         
         std::mt19937 rng(static_cast<unsigned int>(x * size + y));
@@ -659,14 +753,19 @@ static sg_image generate_brdf_lut() {
             // Half vector in tangent space
             HMM_Vec3 H = HMM_V3(cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta);
             
-            float NdotH = H.Z;  // N = (0,0,1) in tangent space
-            float VdotH = HMM_DotV3(V, H);
+            // Calculate L = reflect(-V, H) = 2 * dot(V, H) * H - V
+            float VdotH = HMM_MAX(HMM_DotV3(V, H), 0.0f);
+            HMM_Vec3 L = HMM_SubV3(HMM_MulV3F(H, 2.0f * VdotH), V);
             
-            if (NdotH > 0.0f && VdotH > 0.0f) {
-                // Simplified geometry term
-                float G = HMM_MIN(2.0f * NdotH / VdotH, 1.0f);
-                float G_Vis = G * VdotH / (NdotH * NdotV);
-                float Fc = powf(HMM_MAX(1.0f - VdotH, 0.0f), 5.0f);
+            float NdotL = HMM_MAX(L.Z, 0.0f);  // N = (0,0,1)
+            float NdotH = HMM_MAX(H.Z, 0.0f);
+            
+            if (NdotL > 0.0f) {
+                // Smith GGX geometry term
+                float G = GeometrySmith_IBL(NdotV, NdotL, roughness);
+                float G_Vis = (G * VdotH) / (NdotH * NdotV);
+                float Fc = powf(1.0f - VdotH, 5.0f);
+                
                 A += (1.0f - Fc) * G_Vis;
                 B += Fc * G_Vis;
             }
@@ -1313,6 +1412,20 @@ static void init() {
     skybox_ibuf_desc.label = "skybox-indices";
     state.skybox_index_buffer = sg_make_buffer(&skybox_ibuf_desc);
     
+    // Create sphere geometry for material preview
+    SphereGeometry sphere = generate_sphere(64, 32);
+    sg_buffer_desc sphere_vbuf_desc = {};
+    sphere_vbuf_desc.data = { sphere.vertices.data(), sphere.vertices.size() * sizeof(float) };
+    sphere_vbuf_desc.label = "sphere-vertices";
+    state.sphere_vertex_buffer = sg_make_buffer(&sphere_vbuf_desc);
+    
+    sg_buffer_desc sphere_ibuf_desc = {};
+    sphere_ibuf_desc.usage.index_buffer = true;
+    sphere_ibuf_desc.data = { sphere.indices.data(), sphere.indices.size() * sizeof(uint32_t) };
+    sphere_ibuf_desc.label = "sphere-indices";
+    state.sphere_index_buffer = sg_make_buffer(&sphere_ibuf_desc);
+    state.sphere_num_indices = (int)sphere.indices.size();
+    
     // Create PBR shader
     sg_shader pbr_shd = sg_make_shader(pbr_pbr_shader_desc(sg_query_backend()));
     sg_pipeline_desc pbr_pip_desc = {};
@@ -1355,6 +1468,20 @@ static void init() {
     skybox_pip_desc.label = "skybox-pipeline";
     state.skybox_pip = sg_make_pipeline(&skybox_pip_desc);
     
+    // Create sphere shader (simple PBR without textures)
+    sg_shader sphere_shd = sg_make_shader(sphere_sphere_shader_desc(sg_query_backend()));
+    sg_pipeline_desc sphere_pip_desc = {};
+    sphere_pip_desc.shader = sphere_shd;
+    sphere_pip_desc.layout.attrs[0].format = SG_VERTEXFORMAT_FLOAT3;  // position
+    sphere_pip_desc.layout.attrs[1].format = SG_VERTEXFORMAT_FLOAT3;  // normal
+    sphere_pip_desc.layout.attrs[2].format = SG_VERTEXFORMAT_FLOAT2;  // uv
+    sphere_pip_desc.index_type = SG_INDEXTYPE_UINT32;
+    sphere_pip_desc.cull_mode = SG_CULLMODE_BACK;
+    sphere_pip_desc.depth.write_enabled = true;
+    sphere_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    sphere_pip_desc.label = "sphere-pipeline";
+    state.sphere_pip = sg_make_pipeline(&sphere_pip_desc);
+    
     // Old simple pipeline (kept for compatibility)
     sg_shader shd = sg_make_shader(mesh_mesh_shader_desc(sg_query_backend()));
     sg_pipeline_desc pip_desc = {};
@@ -1369,10 +1496,10 @@ static void init() {
     pip_desc.label = "mesh-pipeline";
     state.pip = sg_make_pipeline(&pip_desc);
     
-    // Initialize camera
-    state.cam_distance = 5.0f;
-    state.cam_azimuth = 45.0f;
-    state.cam_elevation = 20.0f;
+    // Initialize camera (positioned to view the 11x11 sphere grid)
+    state.cam_distance = 15.0f;
+    state.cam_azimuth = 0.0f;
+    state.cam_elevation = 0.0f;
     state.cam_target = HMM_V3(0, 0, 0);
     
     state.mouse_down = false;
@@ -1412,13 +1539,11 @@ static void frame() {
     state.gui_hovered = state.show_gui && gui_is_hovered();
     
     // Calculate camera position
-    float azimuth_rad = HMM_AngleRad(state.cam_azimuth);
-    float elevation_rad = HMM_AngleRad(state.cam_elevation);
-    
-    float cos_elev = cosf(elevation_rad);
-    float sin_elev = sinf(elevation_rad);
-    float cos_azim = cosf(azimuth_rad);
-    float sin_azim = sinf(azimuth_rad);
+    // Use HMM trig functions which handle degree mode automatically
+    float cos_elev = HMM_CosF(state.cam_elevation);
+    float sin_elev = HMM_SinF(state.cam_elevation);
+    float cos_azim = HMM_CosF(state.cam_azimuth);
+    float sin_azim = HMM_SinF(state.cam_azimuth);
     
     HMM_Vec3 cam_offset = HMM_V3(
         cos_elev * sin_azim * state.cam_distance,
@@ -1589,6 +1714,69 @@ static void frame() {
                 sg_draw(0, mesh.num_vertices, 1);
             }
         }
+    } else {
+        // Render material preview spheres (11x11 grid)
+        // Rows: metallic from 1.0 (top) to 0.0 (bottom)
+        // Columns: roughness from 0.0 (left) to 1.0 (right)
+        const int grid_size = 11;
+        const float sphere_radius = 0.4f;
+        const float spacing = 1.0f;
+        const float grid_offset = (grid_size - 1) * spacing * 0.5f;
+        
+        sg_apply_pipeline(state.sphere_pip);
+        
+        // Set up bindings for spheres (only IBL textures needed)
+        sg_bindings sphere_bind = {};
+        sphere_bind.vertex_buffers[0] = state.sphere_vertex_buffer;
+        sphere_bind.index_buffer = state.sphere_index_buffer;
+        sphere_bind.views[VIEW_sphere_irradiance_map] = state.irradiance_map_view;
+        sphere_bind.samplers[SMP_sphere_irradiance_smp] = state.smp;
+        sphere_bind.views[VIEW_sphere_prefilter_map] = state.prefilter_map_view;
+        sphere_bind.samplers[SMP_sphere_prefilter_smp] = state.smp;
+        sphere_bind.views[VIEW_sphere_brdf_lut] = state.brdf_lut_view;
+        sphere_bind.samplers[SMP_sphere_brdf_lut_smp] = state.smp;
+        
+        sg_apply_bindings(&sphere_bind);
+        
+        for (int row = 0; row < grid_size; row++) {
+            for (int col = 0; col < grid_size; col++) {
+                // Calculate sphere position
+                float x = col * spacing - grid_offset;
+                float y = (grid_size - 1 - row) * spacing - grid_offset;  // Invert row so top is metallic=1.0
+                float z = 0.0f;
+                
+                // Calculate material parameters
+                float metallic = 1.0f - (float)row / (float)(grid_size - 1);  // Top to bottom: 1.0 to 0.0
+                float roughness = (float)col / (float)(grid_size - 1);        // Left to right: 0.0 to 1.0
+                
+                // Build model matrix for this sphere
+                HMM_Mat4 sphere_model = HMM_MulM4(
+                    HMM_Translate(HMM_V3(x, y, z)),
+                    HMM_Scale(HMM_V3(sphere_radius, sphere_radius, sphere_radius))
+                );
+                HMM_Mat4 sphere_mvp = HMM_MulM4(proj, HMM_MulM4(view, sphere_model));
+                HMM_Mat4 sphere_normal_matrix = HMM_Transpose(HMM_InvGeneral(sphere_model));
+                
+                // Vertex shader uniforms
+                sphere_vs_params_t vs_uniforms = {};
+                vs_uniforms.mvp = sphere_mvp;
+                vs_uniforms.model = sphere_model;
+                vs_uniforms.normal_matrix = sphere_normal_matrix;
+                vs_uniforms.cam_pos = cam_pos;
+                sg_apply_uniforms(UB_sphere_vs_params, SG_RANGE(vs_uniforms));
+                
+                // Fragment shader uniforms - red color with varying metallic/roughness
+                sphere_fs_params_t fs_uniforms = {};
+                fs_uniforms.base_color = HMM_V3(0.9f, 0.1f, 0.1f);  // Red color
+                fs_uniforms.metallic = metallic;
+                fs_uniforms.roughness = roughness;
+                fs_uniforms.cam_pos = cam_pos;
+                sg_apply_uniforms(UB_sphere_fs_params, SG_RANGE(fs_uniforms));
+                
+                // Draw sphere
+                sg_draw(0, state.sphere_num_indices, 1);
+            }
+        }
     }
     
     // Render GUI
@@ -1665,6 +1853,10 @@ static void cleanup() {
     sg_destroy_buffer(state.skybox_vertex_buffer);
     sg_destroy_buffer(state.skybox_index_buffer);
     
+    // Clean up sphere preview
+    sg_destroy_buffer(state.sphere_vertex_buffer);
+    sg_destroy_buffer(state.sphere_index_buffer);
+    
     // Clean up IBL resources
     sg_destroy_view(state.brdf_lut_view);
     sg_destroy_image(state.brdf_lut);
@@ -1686,6 +1878,7 @@ static void cleanup() {
     // Clean up pipelines
     sg_destroy_sampler(state.smp);
     sg_destroy_pipeline(state.skybox_pip);
+    sg_destroy_pipeline(state.sphere_pip);
     sg_destroy_pipeline(state.toon_pip);
     sg_destroy_pipeline(state.pbr_pip);
     sg_destroy_pipeline(state.pip);

@@ -69,6 +69,7 @@ add_sokol_shader(vrm_viewer shader/mesh.glsl)
 add_sokol_shader(vrm_viewer shader/pbr.glsl)
 add_sokol_shader(vrm_viewer shader/skybox.glsl)
 add_sokol_shader(vrm_viewer shader/toon.glsl)
+add_sokol_shader(vrm_viewer shader/sphere.glsl)
 
 # Platform-specific settings
 if(WIN32)
