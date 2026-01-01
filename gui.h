@@ -9,19 +9,19 @@
 extern "C" {
 #endif
 
-// GUI state that can be modified from C++
+// GUI state that can be modified by GUI interactions
 typedef struct {
-    // Model info
+    // Model info (read-only from GUI perspective)
     int model_loaded;
     int is_vrm_model;
     int mesh_count;
     
-    // Skybox settings
+    // Skybox settings (modifiable via GUI)
     int show_skybox;
     float skybox_exposure;
     float skybox_lod;
     
-    // Toon shader parameters
+    // Toon shader parameters (modifiable via GUI)
     float toon_light_intensity;
     float toon_shade_toony;
     float toon_shade_strength;
@@ -32,6 +32,11 @@ typedef struct {
     // GUI state
     int show_gui;
     int gui_hovered;
+    
+    // Mouse state for slider interaction
+    int mouse_pressed;
+    float mouse_x;
+    float mouse_y;
 } GuiState;
 
 // Initialize GUI system (call after sg_setup)
@@ -40,14 +45,15 @@ void gui_init(void);
 // Shutdown GUI system
 void gui_shutdown(void);
 
-// Handle input events
-void gui_handle_event(const sapp_event* ev);
+// Handle input events - returns 1 if event was consumed by GUI
+int gui_handle_event(const sapp_event* ev);
 
 // Begin new frame (call at start of frame)
 void gui_new_frame(void);
 
-// Render GUI (call before sg_end_pass)
-void gui_render(const GuiState* state);
+// Render GUI and handle interactions
+// Returns 1 if any value was modified, 0 otherwise
+int gui_render(GuiState* state);
 
 // Check if mouse is over GUI panel
 int gui_is_hovered(void);

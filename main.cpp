@@ -1593,7 +1593,21 @@ static void frame() {
     gui_state.toon_spec_intensity = state.toon_spec_intensity;
     gui_state.show_gui = state.show_gui;
     gui_state.gui_hovered = state.gui_hovered;
+    gui_state.mouse_pressed = state.mouse_down;
+    gui_state.mouse_x = state.last_mouse_x;
+    gui_state.mouse_y = state.last_mouse_y;
     gui_render(&gui_state);
+    
+    // Sync GUI changes back to application state
+    state.show_skybox = gui_state.show_skybox;
+    state.skybox_exposure = gui_state.skybox_exposure;
+    state.skybox_lod = gui_state.skybox_lod;
+    state.toon_light_intensity = gui_state.toon_light_intensity;
+    state.toon_shade_toony = gui_state.toon_shade_toony;
+    state.toon_shade_strength = gui_state.toon_shade_strength;
+    state.toon_rim_threshold = gui_state.toon_rim_threshold;
+    state.toon_rim_softness = gui_state.toon_rim_softness;
+    state.toon_spec_intensity = gui_state.toon_spec_intensity;
     
     sg_end_pass();
     sg_commit();
@@ -1672,8 +1686,7 @@ static void event(const sapp_event* ev) {
     
     switch (ev->type) {
         case SAPP_EVENTTYPE_MOUSE_DOWN:
-            // Don't start camera drag if over GUI
-            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT && !state.gui_hovered) {
+            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
                 state.mouse_down = true;
                 state.last_mouse_x = ev->mouse_x;
                 state.last_mouse_y = ev->mouse_y;
@@ -1687,6 +1700,7 @@ static void event(const sapp_event* ev) {
             break;
             
         case SAPP_EVENTTYPE_MOUSE_MOVE:
+            // Camera rotation only when dragging outside GUI
             if (state.mouse_down && !state.gui_hovered) {
                 float dx = ev->mouse_x - state.last_mouse_x;
                 float dy = ev->mouse_y - state.last_mouse_y;
@@ -1696,10 +1710,10 @@ static void event(const sapp_event* ev) {
                 
                 // Clamp elevation
                 state.cam_elevation = HMM_Clamp(-89.0f, state.cam_elevation, 89.0f);
-                
-                state.last_mouse_x = ev->mouse_x;
-                state.last_mouse_y = ev->mouse_y;
             }
+            // Always update mouse position for GUI interactions
+            state.last_mouse_x = ev->mouse_x;
+            state.last_mouse_y = ev->mouse_y;
             break;
             
         case SAPP_EVENTTYPE_MOUSE_SCROLL:
