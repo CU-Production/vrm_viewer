@@ -173,21 +173,22 @@ static void gui_render_toggle(int id, const char* label, int* value) {
     Clay_ElementId toggleId = CLAY_IDI("ToggleButton", id);
     bool isHovered = Clay_PointerOver(toggleId);
     
-    // Handle click
-    if (g_current_state && g_current_state->mouse_pressed && isHovered) {
-        Clay_ElementData elemData = Clay_GetElementData(toggleId);
-        if (elemData.found) {
-            // Toggle on click (only on first frame of press)
-            static int last_toggle_id = -1;
-            if (last_toggle_id != id) {
-                *value = !(*value);
-                last_toggle_id = id;
-            }
-        }
-    } else if (!g_current_state || !g_current_state->mouse_pressed) {
-        // Reset when mouse released
-        static int last_toggle_id = -1;
-        last_toggle_id = -1;
+    // Handle click - use static variable to track last clicked toggle
+    static int s_last_toggle_id = -1;
+    static int s_was_pressed = 0;
+    
+    int is_pressed = g_current_state && g_current_state->mouse_pressed;
+    
+    // Detect mouse release (was pressed, now not pressed)
+    if (s_was_pressed && !is_pressed) {
+        s_last_toggle_id = -1;  // Reset on mouse release
+    }
+    s_was_pressed = is_pressed;
+    
+    // Toggle on click (only on first frame of press for this specific toggle)
+    if (is_pressed && isHovered && s_last_toggle_id != id) {
+        *value = !(*value);
+        s_last_toggle_id = id;
     }
     
     Clay_Color toggleColor = *value ? COLOR_TOGGLE_ON : COLOR_TOGGLE_OFF;
