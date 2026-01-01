@@ -348,8 +348,8 @@ static void sample_equirectangular(const float* hdr_data, int width, int height,
 
 // Convert equirectangular HDR to cubemap
 static sg_image equirectangular_to_cubemap(const float* hdr_data, int hdr_width, int hdr_height, int cubemap_size) {
-    const int face_size = cubemap_size * cubemap_size * 4;  // RGBA8 per face
-    std::vector<uint8_t> cubemap_data(face_size * 6);  // 6 faces
+    const int face_size = cubemap_size * cubemap_size * 4;  // RGBA32F per face
+    std::vector<float> cubemap_data(face_size * 6);  // 6 faces
     
     // Cubemap face directions: +X, -X, +Y, -Y, +Z, -Z
     float face_dirs[6][3] = {
@@ -374,48 +374,48 @@ static sg_image equirectangular_to_cubemap(const float* hdr_data, int hdr_width,
     parallelutil::parallel_for_2d(6 * cubemap_size, cubemap_size, [&](int face_y, int x) {
         int face = face_y / cubemap_size;
         int y = face_y % cubemap_size;
-        uint8_t* face_data = cubemap_data.data() + face * face_size;
+        float* face_data = cubemap_data.data() + face * face_size;
         
         // Convert cubemap UV to world direction
-            float u = (x + 0.5f) / cubemap_size * 2.0f - 1.0f;
-            float v = (y + 0.5f) / cubemap_size * 2.0f - 1.0f;
-            
-            // Get face direction vectors
-            float right[3], up[3], forward[3];
-            memcpy(forward, face_dirs[face], sizeof(float) * 3);
-            memcpy(up, face_up[face], sizeof(float) * 3);
-            
-            // Calculate right vector
-            right[0] = up[1] * forward[2] - up[2] * forward[1];
-            right[1] = up[2] * forward[0] - up[0] * forward[2];
-            right[2] = up[0] * forward[1] - up[1] * forward[0];
-            
-            // Calculate world direction
-            float dir[3];
-            dir[0] = forward[0] + right[0] * u + up[0] * v;
-            dir[1] = forward[1] + right[1] * u + up[1] * v;
-            dir[2] = forward[2] + right[2] * u + up[2] * v;
-            
-            // Normalize
-            float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-            dir[0] /= len;
-            dir[1] /= len;
-            dir[2] /= len;
-            
-            // Convert to spherical coordinates
-            float theta = acosf(fmaxf(-1.0f, fminf(1.0f, dir[1])));  // [0, PI]
-            float phi = atan2f(dir[0], dir[2]) + 3.14159265359f;     // [0, 2*PI]
-            
-            // Sample equirectangular texture
-            float rgb[3];
-            sample_equirectangular(hdr_data, hdr_width, hdr_height, theta, phi, rgb);
-            
-            // Convert to RGBA8 (with tone mapping for display)
-            int idx = (y * cubemap_size + x) * 4;
-            face_data[idx + 0] = (uint8_t)(fminf(rgb[0] * 255.0f / (rgb[0] + 1.0f), 255.0f));
-            face_data[idx + 1] = (uint8_t)(fminf(rgb[1] * 255.0f / (rgb[1] + 1.0f), 255.0f));
-            face_data[idx + 2] = (uint8_t)(fminf(rgb[2] * 255.0f / (rgb[2] + 1.0f), 255.0f));
-            face_data[idx + 3] = 255;
+        float u = (x + 0.5f) / cubemap_size * 2.0f - 1.0f;
+        float v = (y + 0.5f) / cubemap_size * 2.0f - 1.0f;
+        
+        // Get face direction vectors
+        float right[3], up[3], forward[3];
+        memcpy(forward, face_dirs[face], sizeof(float) * 3);
+        memcpy(up, face_up[face], sizeof(float) * 3);
+        
+        // Calculate right vector
+        right[0] = up[1] * forward[2] - up[2] * forward[1];
+        right[1] = up[2] * forward[0] - up[0] * forward[2];
+        right[2] = up[0] * forward[1] - up[1] * forward[0];
+        
+        // Calculate world direction
+        float dir[3];
+        dir[0] = forward[0] + right[0] * u + up[0] * v;
+        dir[1] = forward[1] + right[1] * u + up[1] * v;
+        dir[2] = forward[2] + right[2] * u + up[2] * v;
+        
+        // Normalize
+        float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        dir[0] /= len;
+        dir[1] /= len;
+        dir[2] /= len;
+        
+        // Convert to spherical coordinates
+        float theta = acosf(fmaxf(-1.0f, fminf(1.0f, dir[1])));  // [0, PI]
+        float phi = atan2f(dir[0], dir[2]) + 3.14159265359f;     // [0, 2*PI]
+        
+        // Sample equirectangular texture
+        float rgb[3];
+        sample_equirectangular(hdr_data, hdr_width, hdr_height, theta, phi, rgb);
+        
+        // Store HDR values directly (preserve full dynamic range)
+        int idx = (y * cubemap_size + x) * 4;
+        face_data[idx + 0] = rgb[0];
+        face_data[idx + 1] = rgb[1];
+        face_data[idx + 2] = rgb[2];
+        face_data[idx + 3] = 1.0f;
     });
     
     sg_image_desc desc = {};
@@ -423,8 +423,8 @@ static sg_image equirectangular_to_cubemap(const float* hdr_data, int hdr_width,
     desc.width = cubemap_size;
     desc.height = cubemap_size;
     desc.num_slices = 6;
-    desc.pixel_format = SG_PIXELFORMAT_RGBA8;
-    desc.data.mip_levels[0] = { cubemap_data.data(), cubemap_data.size() };
+    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;  // Use 32-bit float to preserve HDR range
+    desc.data.mip_levels[0] = { cubemap_data.data(), cubemap_data.size() * sizeof(float) };
     desc.label = "environment-cubemap";
     return sg_make_image(&desc);
 }
@@ -432,7 +432,7 @@ static sg_image equirectangular_to_cubemap(const float* hdr_data, int hdr_width,
 // Generate irradiance map by convolving the environment cubemap
 static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, int hdr_height, int size) {
     const int face_size = size * size * 4;
-    std::vector<uint8_t> irradiance_data(face_size * 6);
+    std::vector<float> irradiance_data(face_size * 6);
     
     float face_dirs[6][3] = {
         { 1.0f,  0.0f,  0.0f}, {-1.0f,  0.0f,  0.0f},
@@ -449,10 +449,10 @@ static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, in
     parallelutil::parallel_for_2d(6 * size, size, [&](int face_y, int x) {
         int face = face_y / size;
         int y = face_y % size;
-        uint8_t* face_data = irradiance_data.data() + face * face_size;
+        float* face_data = irradiance_data.data() + face * face_size;
         
         float u = (x + 0.5f) / size * 2.0f - 1.0f;
-            float v = (y + 0.5f) / size * 2.0f - 1.0f;
+        float v = (y + 0.5f) / size * 2.0f - 1.0f;
             
             float right[3], up[3], forward[3];
             memcpy(forward, face_dirs[face], sizeof(float) * 3);
@@ -523,15 +523,16 @@ static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, in
             irradiance[0] /= num_samples;
             irradiance[1] /= num_samples;
             irradiance[2] /= num_samples;
-            irradiance[0] *= 3.14159265359f;  // Multiply by PI for Lambertian
-            irradiance[1] *= 3.14159265359f;
-            irradiance[2] *= 3.14159265359f;
-            
-            int idx = (y * size + x) * 4;
-            face_data[idx + 0] = (uint8_t)(fminf(irradiance[0] * 255.0f / (irradiance[0] + 1.0f), 255.0f));
-            face_data[idx + 1] = (uint8_t)(fminf(irradiance[1] * 255.0f / (irradiance[1] + 1.0f), 255.0f));
-            face_data[idx + 2] = (uint8_t)(fminf(irradiance[2] * 255.0f / (irradiance[2] + 1.0f), 255.0f));
-            face_data[idx + 3] = 255;
+        irradiance[0] *= 3.14159265359f;  // Multiply by PI for Lambertian
+        irradiance[1] *= 3.14159265359f;
+        irradiance[2] *= 3.14159265359f;
+        
+        // Store HDR values directly (preserve full dynamic range)
+        int idx = (y * size + x) * 4;
+        face_data[idx + 0] = irradiance[0];
+        face_data[idx + 1] = irradiance[1];
+        face_data[idx + 2] = irradiance[2];
+        face_data[idx + 3] = 1.0f;
     });
     
     sg_image_desc desc = {};
@@ -539,8 +540,8 @@ static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, in
     desc.width = size;
     desc.height = size;
     desc.num_slices = 6;
-    desc.pixel_format = SG_PIXELFORMAT_RGBA8;
-    desc.data.mip_levels[0] = { irradiance_data.data(), irradiance_data.size() };
+    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;  // Use 32-bit float to preserve HDR range
+    desc.data.mip_levels[0] = { irradiance_data.data(), irradiance_data.size() * sizeof(float) };
     desc.label = "irradiance-map";
     return sg_make_image(&desc);
 }
@@ -548,7 +549,7 @@ static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, in
 // Generate prefilter map with mipmaps
 static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int hdr_height, int size) {
     const int face_size = size * size * 4;
-    std::vector<uint8_t> prefilter_data(face_size * 6);
+    std::vector<float> prefilter_data(face_size * 6);
     
     float face_dirs[6][3] = {
         { 1.0f,  0.0f,  0.0f}, {-1.0f,  0.0f,  0.0f},
@@ -565,10 +566,10 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
     parallelutil::parallel_for_2d(6 * size, size, [&](int face_y, int x) {
         int face = face_y / size;
         int y = face_y % size;
-        uint8_t* face_data = prefilter_data.data() + face * face_size;
+        float* face_data = prefilter_data.data() + face * face_size;
         
         float u = (x + 0.5f) / size * 2.0f - 1.0f;
-            float v = (y + 0.5f) / size * 2.0f - 1.0f;
+        float v = (y + 0.5f) / size * 2.0f - 1.0f;
             
             float right[3], up[3], forward[3];
             memcpy(forward, face_dirs[face], sizeof(float) * 3);
@@ -650,17 +651,18 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
                 }
             }
             
-            if (total_weight > 0.0f) {
-                prefiltered[0] /= total_weight;
-                prefiltered[1] /= total_weight;
-                prefiltered[2] /= total_weight;
-            }
-            
-            int idx = (y * size + x) * 4;
-            face_data[idx + 0] = (uint8_t)(fminf(prefiltered[0] * 255.0f / (prefiltered[0] + 1.0f), 255.0f));
-            face_data[idx + 1] = (uint8_t)(fminf(prefiltered[1] * 255.0f / (prefiltered[1] + 1.0f), 255.0f));
-            face_data[idx + 2] = (uint8_t)(fminf(prefiltered[2] * 255.0f / (prefiltered[2] + 1.0f), 255.0f));
-            face_data[idx + 3] = 255;
+        if (total_weight > 0.0f) {
+            prefiltered[0] /= total_weight;
+            prefiltered[1] /= total_weight;
+            prefiltered[2] /= total_weight;
+        }
+        
+        // Store HDR values directly (preserve full dynamic range)
+        int idx = (y * size + x) * 4;
+        face_data[idx + 0] = prefiltered[0];
+        face_data[idx + 1] = prefiltered[1];
+        face_data[idx + 2] = prefiltered[2];
+        face_data[idx + 3] = 1.0f;
     });
     
     sg_image_desc desc = {};
@@ -668,8 +670,8 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
     desc.width = size;
     desc.height = size;
     desc.num_slices = 6;
-    desc.pixel_format = SG_PIXELFORMAT_RGBA8;
-    desc.data.mip_levels[0] = { prefilter_data.data(), prefilter_data.size() };
+    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;  // Use 32-bit float to preserve HDR range
+    desc.data.mip_levels[0] = { prefilter_data.data(), prefilter_data.size() * sizeof(float) };
     desc.label = "prefilter-map";
     return sg_make_image(&desc);
 }
@@ -775,17 +777,22 @@ static sg_image generate_brdf_lut() {
 // Create a simple cubemap placeholder
 static sg_image create_simple_cubemap(uint8_t r, uint8_t g, uint8_t b) {
     const int size = 64;
-    const int face_size = size * size * 4;  // RGBA8 per face
-    std::vector<uint8_t> cubemap_data(face_size * 6);  // 6 faces
+    const int face_size = size * size * 4;  // RGBA32F per face
+    std::vector<float> cubemap_data(face_size * 6);  // 6 faces
+    
+    // Convert uint8 color to float (normalized to 0-1 range, then scale for HDR)
+    float rf = (r / 255.0f) * 0.1f;  // Low intensity for placeholder
+    float gf = (g / 255.0f) * 0.1f;
+    float bf = (b / 255.0f) * 0.1f;
     
     // Fill all 6 faces with the same color
     for (int face = 0; face < 6; face++) {
-        uint8_t* face_data = cubemap_data.data() + face * face_size;
+        float* face_data = cubemap_data.data() + face * face_size;
         for (int i = 0; i < size * size; i++) {
-            face_data[i * 4 + 0] = r;
-            face_data[i * 4 + 1] = g;
-            face_data[i * 4 + 2] = b;
-            face_data[i * 4 + 3] = 255;
+            face_data[i * 4 + 0] = rf;
+            face_data[i * 4 + 1] = gf;
+            face_data[i * 4 + 2] = bf;
+            face_data[i * 4 + 3] = 1.0f;
         }
     }
     
@@ -794,9 +801,9 @@ static sg_image create_simple_cubemap(uint8_t r, uint8_t g, uint8_t b) {
     desc.width = size;
     desc.height = size;
     desc.num_slices = 6;  // Required for cubemap
-    desc.pixel_format = SG_PIXELFORMAT_RGBA8;  // Explicitly set pixel format
+    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;  // Use 32-bit float to preserve HDR range
     // For cubemap, each mip level contains all 6 faces in order: +X, -X, +Y, -Y, +Z, -Z
-    desc.data.mip_levels[0] = { cubemap_data.data(), cubemap_data.size() };
+    desc.data.mip_levels[0] = { cubemap_data.data(), cubemap_data.size() * sizeof(float) };
     desc.label = "simple-cubemap";
     return sg_make_image(&desc);
 }
