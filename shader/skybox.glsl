@@ -48,6 +48,13 @@ vec3 ACESFilm(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+// Accurate sRGB transfer function (linear to sRGB)
+vec3 linearToSRGB(vec3 c) {
+    vec3 lo = c * 12.92;
+    vec3 hi = pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) * 1.055 - 0.055;
+    return mix(lo, hi, step(vec3(0.0031308), c));
+}
+
 void main() {
     vec3 env_color = textureLod(samplerCube(environment_map, env_smp), v_world_pos, lod_level).rgb;
     
@@ -56,8 +63,8 @@ void main() {
     
     // ACES Filmic tonemapping
     env_color = ACESFilm(env_color);
-    // Gamma correction (ensure non-negative for pow)
-    env_color = pow(max(env_color, vec3(0.0)), vec3(1.0 / 2.2));
+    // Convert linear to sRGB for display
+    env_color = linearToSRGB(env_color);
     
     frag_color = vec4(env_color, 1.0);
 }

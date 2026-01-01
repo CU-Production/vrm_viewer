@@ -78,6 +78,13 @@ vec3 ACESFilm(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+// Accurate sRGB transfer function (linear to sRGB)
+vec3 linearToSRGB(vec3 c) {
+    vec3 lo = c * 12.92;
+    vec3 hi = pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) * 1.055 - 0.055;
+    return mix(lo, hi, step(vec3(0.0031308), c));
+}
+
 // Toon shading functions
 float toon_ramp(float ndotl, float steps) {
     return floor(ndotl * steps) / steps;
@@ -139,8 +146,8 @@ void main() {
     
     // ACES Filmic tonemapping
     color = ACESFilm(color);
-    // Gamma correction (ensure non-negative for pow)
-    color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
+    // Convert linear to sRGB for display
+    color = linearToSRGB(color);
     
     frag_color = vec4(color, base_color.a);
 }

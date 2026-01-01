@@ -224,14 +224,14 @@ static FILE* fopen_utf8(const char* filepath, const char* mode) {
 }
 #endif
 
-static sg_view create_texture_view(sg_image img) {
+static sg_view create_texture_view(sg_image img, int num_mips = 1) {
     sg_view_desc view_desc = {};
     view_desc.texture.image = img;
     // For cubemap, slices must be base=0, count=1 (entire cubemap)
     view_desc.texture.slices.base = 0;
     view_desc.texture.slices.count = 1;
     view_desc.texture.mip_levels.base = 0;
-    view_desc.texture.mip_levels.count = 1;
+    view_desc.texture.mip_levels.count = num_mips;
     return sg_make_view(&view_desc);
 }
 
@@ -501,35 +501,34 @@ static sg_image generate_irradiance_map(const float* hdr_data, int hdr_width, in
     return sg_make_image(&desc);
 }
 
-// Generate prefilter map with importance sampling
-static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int hdr_height, int size) {
-    const int face_size = size * size * 4;
-    std::vector<float> prefilter_data(face_size * 6);
+// Generate a single mip level for prefilter map
+static void generate_prefilter_mip(const float* hdr_data, int hdr_width, int hdr_height,
+                                    float* out_data, int mip_size, float roughness) {
+    const int face_size = mip_size * mip_size * 4;
     
-    parallelutil::parallel_for_2d(6 * size, size, [&](int face_y, int x) {
-        int face = face_y / size;
-        int y = face_y % size;
-        float* face_data = prefilter_data.data() + face * face_size;
+    // More samples for rougher surfaces (they need more averaging)
+    const int base_samples = 64;
+    const int num_samples = base_samples + (int)(roughness * 192);  // 64-256 samples
+    
+    parallelutil::parallel_for_2d(6 * mip_size, mip_size, [&](int face_y, int x) {
+        int face = face_y / mip_size;
+        int y = face_y % mip_size;
+        float* face_data = out_data + face * face_size;
         
-        float u = (x + 0.5f) / size * 2.0f - 1.0f;
-        float v = (y + 0.5f) / size * 2.0f - 1.0f;
+        float u = (x + 0.5f) / mip_size * 2.0f - 1.0f;
+        float v = (y + 0.5f) / mip_size * 2.0f - 1.0f;
         
-        // Get reflection direction (also used as normal and view)
         HMM_Vec3 R = get_cubemap_direction(face, u, v);
-        
-        // Build tangent space around R
         HMM_Vec3 T, B;
         build_tangent_space(R, &T, &B);
         
-        // For prefilter map, use low roughness (base mip level)
-        float roughness = 0.1f;
+        // Use roughness^2 for GGX (remapped roughness)
         float a = roughness * roughness;
+        float a2 = a * a;
         
-        // Importance sampling for specular IBL
         HMM_Vec3 prefiltered = HMM_V3(0, 0, 0);
         float total_weight = 0.0f;
-        const int num_samples = 64;
-        std::mt19937 rng(static_cast<unsigned int>(face * size * size + y * size + x));
+        std::mt19937 rng(static_cast<unsigned int>(face * mip_size * mip_size + y * mip_size + x));
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         
         for (int i = 0; i < num_samples; i++) {
@@ -538,16 +537,11 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
             
             // GGX importance sampling
             float phi = 2.0f * HMM_PI32 * Xi1;
-            float cosTheta = sqrtf((1.0f - Xi2) / (1.0f + (a * a - 1.0f) * Xi2));
+            float cosTheta = sqrtf((1.0f - Xi2) / (1.0f + (a2 - 1.0f) * Xi2));
             float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
             
-            // Half vector in tangent space
             HMM_Vec3 H_local = HMM_V3(sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta);
-            
-            // Transform to world space
             HMM_Vec3 H = tangent_to_world(H_local, T, B, R);
-            
-            // Compute light direction (reflect V around H, where V = R)
             HMM_Vec3 L = HMM_NormV3(reflect(R, H));
             
             float NdotL = HMM_MAX(0.0f, HMM_DotV3(R, L));
@@ -562,21 +556,61 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
             prefiltered = HMM_MulV3F(prefiltered, 1.0f / total_weight);
         }
         
-        // Store HDR values
-        int idx = (y * size + x) * 4;
+        int idx = (y * mip_size + x) * 4;
         face_data[idx + 0] = prefiltered.X;
         face_data[idx + 1] = prefiltered.Y;
         face_data[idx + 2] = prefiltered.Z;
         face_data[idx + 3] = 1.0f;
     });
+}
+
+// Generate prefilter map with multiple mip levels for different roughness values
+static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int hdr_height, int base_size) {
+    // Calculate number of mip levels (down to 8x8 minimum)
+    const int max_mip_levels = 5;  // 128 -> 64 -> 32 -> 16 -> 8
+    int num_mips = 0;
+    int temp_size = base_size;
+    while (temp_size >= 8 && num_mips < max_mip_levels) {
+        num_mips++;
+        temp_size /= 2;
+    }
     
+    log_message(("Generating prefilter map with " + std::to_string(num_mips) + " mip levels").c_str());
+    
+    // Allocate storage for all mip levels
+    std::vector<std::vector<float>> mip_data(num_mips);
+    
+    for (int mip = 0; mip < num_mips; mip++) {
+        int mip_size = base_size >> mip;  // base_size / 2^mip
+        float roughness = (float)mip / (float)(num_mips - 1);  // 0.0 to 1.0
+        
+        // Ensure minimum roughness to avoid singularities
+        roughness = HMM_MAX(roughness, 0.01f);
+        
+        log_message(("  Mip " + std::to_string(mip) + ": " + std::to_string(mip_size) + 
+                     "x" + std::to_string(mip_size) + ", roughness=" + 
+                     std::to_string(roughness)).c_str());
+        
+        int face_size = mip_size * mip_size * 4;
+        mip_data[mip].resize(face_size * 6);
+        
+        generate_prefilter_mip(hdr_data, hdr_width, hdr_height, 
+                               mip_data[mip].data(), mip_size, roughness);
+    }
+    
+    // Create image with all mip levels
     sg_image_desc desc = {};
     desc.type = SG_IMAGETYPE_CUBE;
-    desc.width = size;
-    desc.height = size;
+    desc.width = base_size;
+    desc.height = base_size;
     desc.num_slices = 6;
+    desc.num_mipmaps = num_mips;
     desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
-    desc.data.mip_levels[0] = { prefilter_data.data(), prefilter_data.size() * sizeof(float) };
+    
+    for (int mip = 0; mip < num_mips; mip++) {
+        desc.data.mip_levels[mip] = { mip_data[mip].data(), mip_data[mip].size() * sizeof(float) };
+    }
+    
     desc.label = "prefilter-map";
     return sg_make_image(&desc);
 }
@@ -735,10 +769,11 @@ static void create_ibl_maps(const char* hdr_filepath) {
     state.irradiance_map = generate_irradiance_map(hdr_data, hdr_width, hdr_height, irradiance_size);
     state.irradiance_map_view = create_texture_view(state.irradiance_map);
     
-    // Generate prefilter map
+    // Generate prefilter map with mip chain for different roughness levels
     int prefilter_size = 256;
+    int prefilter_mips = 5;  // 256 -> 128 -> 64 -> 32 -> 16 (matches MAX_REFLECTION_LOD in shader)
     state.prefilter_map = generate_prefilter_map(hdr_data, hdr_width, hdr_height, prefilter_size);
-    state.prefilter_map_view = create_texture_view(state.prefilter_map);
+    state.prefilter_map_view = create_texture_view(state.prefilter_map, prefilter_mips);
     
     // Generate BRDF LUT
     state.brdf_lut = generate_brdf_lut();
