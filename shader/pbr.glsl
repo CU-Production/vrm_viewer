@@ -224,19 +224,23 @@ void main() {
     // Image-Based Lighting (IBL)
     // ========================================================================
     
+    // IBL intensity control (adjust these to taste)
+    const float IBL_DIFFUSE_INTENSITY = 0.3;   // Reduce diffuse IBL
+    const float IBL_SPECULAR_INTENSITY = 0.5;  // Reduce specular IBL
+    
     // Fresnel for IBL (accounts for roughness)
     vec3 F_ibl = F_SchlickRoughness(NdotV, F0, roughness);
     vec3 kD_ibl = (1.0 - F_ibl) * (1.0 - metallic);
     
     // Diffuse IBL (from irradiance map)
     vec3 irradiance = texture(samplerCube(irradiance_map, irradiance_smp), N).rgb;
-    vec3 diffuse_ibl = irradiance * diffuseColor;
+    vec3 diffuse_ibl = irradiance * diffuseColor * IBL_DIFFUSE_INTENSITY;
     
     // Specular IBL (from prefilter map + BRDF LUT)
     const float MAX_REFLECTION_LOD = 4.0;
     vec3 prefilteredColor = textureLod(samplerCube(prefilter_map, prefilter_smp), R, roughness * MAX_REFLECTION_LOD).rgb;
     vec2 brdf = texture(sampler2D(brdf_lut, brdf_lut_smp), vec2(NdotV, roughness)).rg;
-    vec3 specular_ibl = prefilteredColor * (F_ibl * brdf.x + brdf.y);
+    vec3 specular_ibl = prefilteredColor * (F_ibl * brdf.x + brdf.y) * IBL_SPECULAR_INTENSITY;
     
     // Combined ambient (IBL)
     vec3 ambient = (kD_ibl * diffuse_ibl + specular_ibl) * ao;

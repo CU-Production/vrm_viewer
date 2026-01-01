@@ -1468,12 +1468,12 @@ static void frame() {
                 bind.samplers[SMP_toon_base_color_smp] = state.smp;
                 bind.views[VIEW_toon_metallic_roughness_tex] = mesh.material.metallic_roughness_view;
                 bind.samplers[SMP_toon_metallic_roughness_smp] = state.smp;
+                bind.views[VIEW_toon_normal_tex] = mesh.material.normal_view;
+                bind.samplers[SMP_toon_normal_smp] = state.smp;
                 bind.views[VIEW_toon_irradiance_map] = state.irradiance_map_view;
                 bind.samplers[SMP_toon_irradiance_smp] = state.smp;
                 bind.views[VIEW_toon_prefilter_map] = state.prefilter_map_view;
                 bind.samplers[SMP_toon_prefilter_smp] = state.smp;
-                bind.views[VIEW_toon_brdf_lut] = state.brdf_lut_view;
-                bind.samplers[SMP_toon_brdf_lut_smp] = state.smp;
             } else {
                 // PBR shader bindings
                 bind.views[VIEW_pbr_base_color_tex] = mesh.material.base_color_view;
