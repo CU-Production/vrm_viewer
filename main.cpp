@@ -134,6 +134,7 @@ static struct {
     Model model;
     bool model_loaded;
     bool is_vrm_model;
+    bool use_toon_shader;  // Manual override for shader selection
     
     // Camera
     float cam_distance;
@@ -846,9 +847,14 @@ static bool load_model(const char* filepath) {
         for (size_t i = 0; i < data->extensions_used_count; i++) {
             if (strstr(data->extensions_used[i], "VRM") || strstr(data->extensions_used[i], "vrm")) {
                 state.is_vrm_model = true;
+                state.use_toon_shader = true;  // Default to toon shader for VRM models
                 break;
             }
         }
+    }
+    // Non-VRM models default to PBR
+    if (!state.is_vrm_model) {
+        state.use_toon_shader = false;
     }
     
     // Clear existing model
@@ -1373,6 +1379,7 @@ static void init() {
     state.time = 0.0f;
     state.model_loaded = false;
     state.is_vrm_model = false;
+    state.use_toon_shader = false;
     
     // Skybox settings
     state.skybox_lod = 0.0f;
@@ -1484,9 +1491,12 @@ static void frame() {
     
     // Render model with PBR or toon shader
     if (state.model_loaded) {
+        // Use manual shader toggle instead of per-material is_vrm flag
+        bool useToon = state.use_toon_shader;
+        
         for (auto& mesh : state.model.meshes) {
-            // Choose shader based on material
-            if (mesh.material.is_vrm) {
+            // Choose shader based on user selection
+            if (useToon) {
                 sg_apply_pipeline(state.toon_pip);
             } else {
                 sg_apply_pipeline(state.pbr_pip);
@@ -1500,7 +1510,7 @@ static void frame() {
             }
             
             // PBR/Toon texture bindings (using generated constants)
-            if (mesh.material.is_vrm) {
+            if (useToon) {
                 // Toon shader bindings
                 bind.views[VIEW_toon_base_color_tex] = mesh.material.base_color_view;
                 bind.samplers[SMP_toon_base_color_smp] = state.smp;
@@ -1535,7 +1545,7 @@ static void frame() {
             sg_apply_bindings(&bind);
             
             // Vertex shader uniforms
-            if (mesh.material.is_vrm) {
+            if (useToon) {
                 toon_vs_params_t vs_uniforms = {};
                 vs_uniforms.mvp = mvp;
                 vs_uniforms.model = model;
@@ -1552,7 +1562,7 @@ static void frame() {
             }
             
             // Fragment shader uniforms
-            if (mesh.material.is_vrm) {
+            if (useToon) {
                 toon_fs_params_t fs_uniforms = {};
                 fs_uniforms.base_color_factor = mesh.material.base_color_factor;
                 fs_uniforms.metallic_factor = mesh.material.metallic_factor;
@@ -1586,6 +1596,7 @@ static void frame() {
     gui_state.model_loaded = state.model_loaded;
     gui_state.is_vrm_model = state.is_vrm_model;
     gui_state.mesh_count = (int)state.model.meshes.size();
+    gui_state.use_toon_shader = state.use_toon_shader;
     gui_state.show_skybox = state.show_skybox;
     gui_state.skybox_exposure = state.skybox_exposure;
     gui_state.skybox_lod = state.skybox_lod;
@@ -1603,6 +1614,7 @@ static void frame() {
     gui_render(&gui_state);
     
     // Sync GUI changes back to application state
+    state.use_toon_shader = gui_state.use_toon_shader;
     state.show_skybox = gui_state.show_skybox;
     state.skybox_exposure = gui_state.skybox_exposure;
     state.skybox_lod = gui_state.skybox_lod;
@@ -1751,6 +1763,9 @@ static void event(const sapp_event* ev) {
             } else if (ev->key_code == SAPP_KEYCODE_G) {
                 // Toggle GUI
                 state.show_gui = !state.show_gui;
+            } else if (ev->key_code == SAPP_KEYCODE_T) {
+                // Toggle Toon/PBR shader
+                state.use_toon_shader = !state.use_toon_shader;
             } else if (ev->key_code == SAPP_KEYCODE_S) {
                 // Toggle skybox
                 state.show_skybox = !state.show_skybox;

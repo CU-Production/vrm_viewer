@@ -11,10 +11,13 @@ extern "C" {
 
 // GUI state that can be modified by GUI interactions
 typedef struct {
-    // Model info (read-only from GUI perspective)
+    // Model info
     int model_loaded;
     int is_vrm_model;
     int mesh_count;
+    
+    // Shader selection (modifiable via GUI)
+    int use_toon_shader;  // 0 = PBR, 1 = Toon
     
     // Skybox settings (modifiable via GUI)
     int show_skybox;

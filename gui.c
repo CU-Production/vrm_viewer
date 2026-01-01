@@ -290,7 +290,8 @@ static Clay_RenderCommandArray create_gui_layout(GuiState* state) {
                     char mesh_info[64];
                     snprintf(mesh_info, sizeof(mesh_info), "%d", state->mesh_count);
                     gui_render_text_row(0, "Meshes:", mesh_info);
-                    gui_render_text_row(1, "Type:", state->is_vrm_model ? "VRM (Toon)" : "GLTF (PBR)");
+                    gui_render_text_row(1, "Format:", state->is_vrm_model ? "VRM" : "GLTF/GLB");
+                    gui_render_toggle(50, "Toon Shader", &state->use_toon_shader);
                 }
             }
             
@@ -313,8 +314,8 @@ static Clay_RenderCommandArray create_gui_layout(GuiState* state) {
                 gui_render_slider(102, "LOD", &state->skybox_lod, 0.0f, 5.0f, "%.0f");  // 0=env, 1-5=prefilter mips
             }
             
-            // Toon settings
-            if (state->is_vrm_model) {
+            // Toon settings (show when toon shader is enabled)
+            if (state->use_toon_shader) {
                 CLAY(CLAY_ID("ToonSettings"), {
                     .layout = { 
                         .sizing = { .width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0) },
@@ -353,7 +354,7 @@ static Clay_RenderCommandArray create_gui_layout(GuiState* state) {
                 
                 CLAY_TEXT(CLAY_STRING("Controls"), cfgTitle);
                 CLAY_TEXT(CLAY_STRING("Drag: Rotate | Scroll: Zoom | R: Reset"), cfgHelp);
-                CLAY_TEXT(CLAY_STRING("G: Toggle GUI | S: Toggle Skybox"), cfgHelp);
+                CLAY_TEXT(CLAY_STRING("G: GUI | S: Skybox | T: Toon/PBR"), cfgHelp);
             }
             
             // Spacer
