@@ -615,37 +615,6 @@ static sg_image generate_prefilter_map(const float* hdr_data, int hdr_width, int
     return sg_make_image(&desc);
 }
 
-static sg_image load_hdr_texture(const char* filepath) {
-    int width, height, channels;
-    stbi_set_flip_vertically_on_load(0);  // Don't flip HDR - standard is V=0 at top
-    float* hdr_data = stbi_loadf(filepath, &width, &height, &channels, 3);
-    if (!hdr_data) {
-        log_message(("Failed to load HDR: " + std::string(filepath)).c_str());
-        return state.default_texture;
-    }
-    
-    // Convert RGB to RGBA format (add alpha channel)
-    std::vector<float> rgba_data(width * height * 4);
-    for (int i = 0; i < width * height; i++) {
-        rgba_data[i * 4 + 0] = hdr_data[i * 3 + 0];
-        rgba_data[i * 4 + 1] = hdr_data[i * 3 + 1];
-        rgba_data[i * 4 + 2] = hdr_data[i * 3 + 2];
-        rgba_data[i * 4 + 3] = 1.0f;
-    }
-    
-    sg_image_desc desc = {};
-    desc.width = width;
-    desc.height = height;
-    desc.pixel_format = SG_PIXELFORMAT_RGBA32F;  // Use 32-bit single-precision float to preserve HDR range
-    desc.data.mip_levels[0] = { rgba_data.data(), rgba_data.size() * sizeof(float) };
-    desc.label = "hdr-environment";
-    sg_image img = sg_make_image(&desc);
-    
-    stbi_image_free(hdr_data);
-    log_message(("Loaded HDR: " + std::string(filepath)).c_str());
-    return img;
-}
-
 // Generate BRDF LUT (parallelized CPU version)
 static sg_image generate_brdf_lut() {
     const int size = 512;
@@ -753,6 +722,8 @@ static void create_ibl_maps(const char* hdr_filepath) {
     if (!hdr_data) {
         log_message(("Failed to load HDR for IBL: " + std::string(hdr_filepath)).c_str());
         // Fallback to simple cubemaps
+        state.hdr_environment = create_simple_cubemap(128, 128, 128);
+        state.hdr_environment_view = create_texture_view(state.hdr_environment);
         state.irradiance_map = create_simple_cubemap(50, 60, 70);
         state.irradiance_map_view = create_texture_view(state.irradiance_map);
         state.prefilter_map = create_simple_cubemap(80, 90, 100);
@@ -764,12 +735,19 @@ static void create_ibl_maps(const char* hdr_filepath) {
     
     log_message("Generating IBL maps from HDR...");
     
-    // Generate irradiance map
+    // Generate environment cubemap for skybox (high resolution, no filtering)
+    int environment_size = 512;  // Higher resolution for sharp skybox
+    state.hdr_environment = equirectangular_to_cubemap(hdr_data, hdr_width, hdr_height, environment_size);
+    state.hdr_environment_view = create_texture_view(state.hdr_environment);
+    log_message(("  Environment cubemap: " + std::to_string(environment_size) + "x" + std::to_string(environment_size)).c_str());
+    
+    // Generate irradiance map (diffuse IBL)
     int irradiance_size = 32;
     state.irradiance_map = generate_irradiance_map(hdr_data, hdr_width, hdr_height, irradiance_size);
     state.irradiance_map_view = create_texture_view(state.irradiance_map);
+    log_message(("  Irradiance map: " + std::to_string(irradiance_size) + "x" + std::to_string(irradiance_size)).c_str());
     
-    // Generate prefilter map with mip chain for different roughness levels
+    // Generate prefilter map with mip chain for specular IBL
     int prefilter_size = 256;
     int prefilter_mips = 5;  // 256 -> 128 -> 64 -> 32 -> 16 (matches MAX_REFLECTION_LOD in shader)
     state.prefilter_map = generate_prefilter_map(hdr_data, hdr_width, hdr_height, prefilter_size);
@@ -1288,11 +1266,9 @@ static void init() {
     cubemap_smp_desc.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
     sg_sampler cubemap_smp = sg_make_sampler(&cubemap_smp_desc);
     
-    // Load HDR environment and create IBL maps
+    // Load HDR environment and create IBL maps (generates environment cubemap + IBL maps)
     const char* hdr_path = "assets/hdr/modern_evening_street_2k.hdr";
-    state.hdr_environment = load_hdr_texture(hdr_path);  // For display only
-    state.hdr_environment_view = create_texture_view(state.hdr_environment);
-    create_ibl_maps(hdr_path);  // Generate IBL maps from HDR file
+    create_ibl_maps(hdr_path);
     
     // Create skybox geometry
     float skybox_vertices[] = {
@@ -1439,7 +1415,7 @@ static void frame() {
         sg_bindings skybox_bind = {};
         skybox_bind.vertex_buffers[0] = state.skybox_vertex_buffer;
         skybox_bind.index_buffer = state.skybox_index_buffer;
-        skybox_bind.views[VIEW_skybox_environment_map] = state.prefilter_map_view;  // Use prefilter map for skybox
+        skybox_bind.views[VIEW_skybox_environment_map] = state.hdr_environment_view;  // Use environment cubemap for skybox
         skybox_bind.samplers[SMP_skybox_env_smp] = state.smp;
         sg_apply_bindings(&skybox_bind);
         
